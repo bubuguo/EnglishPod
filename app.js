@@ -1,7 +1,7 @@
 /* EnglishPod PWA app logic. */
 'use strict';
 
-const CATALOG_URL = '/lessons.json';
+const CATALOG_URL = './lessons.json';
 const LS_KEY = 'epod-settings';
 
 const $ = (id) => document.getElementById(id);
@@ -377,7 +377,7 @@ async function init() {
 
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.register('./sw.js');
     } catch (err) {
       console.error('SW registration failed:', err);
     }

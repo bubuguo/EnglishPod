@@ -12,7 +12,7 @@ import urllib.request
 ITEM = "englishpod_all"
 META_URL = f"https://archive.org/metadata/{ITEM}"
 BASE = f"https://archive.org/download/{ITEM}/"
-OUT = "public/lessons.json"
+OUT = "../lessons.json"
 
 
 def main():

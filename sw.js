@@ -15,14 +15,14 @@ const QUOTA = 500 * 1024 * 1024; // 500 MB
 const MEDIA_PREFIX = 'https://archive.org/download/englishpod_all/';
 
 const SHELL_ASSETS = [
-  '/',
-  '/index.html',
-  '/styles.css',
-  '/app.js',
-  '/lessons.json',
-  '/manifest.webmanifest',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
+  './',
+  './index.html',
+  './styles.css',
+  './app.js',
+  './lessons.json',
+  './manifest.webmanifest',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
 ];
 
 let nowPlayingUrl = null; // protected from eviction while in use
