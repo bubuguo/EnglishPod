@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>EnglishPod Player</title>
+  <meta name="description" content="Self-hosted PWA for EnglishPod lessons from archive.org" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/icons/icon-192.png" alt="" width="32" height="32" />
+      <h1>EnglishPod Player</h1>
+    </div>
+    <div class="cache-info">
+      <span id="cacheUsage" title="Cached media size / quota">Cache: –</span>
+      <button id="btnClearCache" class="ghost" type="button">Clear cache</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <input id="search" type="search" placeholder="Search lessons…" autocomplete="off" />
+      <ul id="lessonList" class="lesson-list"></ul>
+    </aside>
+
+    <main class="main">
+      <section id="player" class="card hidden">
+        <div class="lesson-head">
+          <div>
+            <h2 id="lessonTitle">–</h2>
+            <p id="lessonMeta" class="muted">–</p>
+          </div>
+          <div class="lesson-actions">
+            <button id="btnDownload" type="button" title="Cache audio, transcript and PDF for offline use">⤓ Offline</button>
+            <button id="btnPdf" type="button" title="View lesson PDF (also cached)">📄 PDF</button>
+          </div>
+        </div>
+
+        <div class="track-row">
+          <label for="trackSelect">Track</label>
+          <select id="trackSelect"></select>
+          <span id="downloadState" class="muted"></span>
+        </div>
+
+        <audio id="audio" controls preload="metadata"></audio>
+
+        <div class="controls">
+          <div class="control">
+            <label for="repeatSelect">Repeat</label>
+            <select id="repeatSelect">
+              <option value="1">1×</option>
+              <option value="2">2×</option>
+              <option value="3">3×</option>
+              <option value="5">5×</option>
+              <option value="10">10×</option>
+              <option value="inf">∞</option>
+            </select>
+            <span id="repeatState" class="muted"></span>
+          </div>
+
+          <div class="control">
+            <label for="sleepSelect">Sleep timer</label>
+            <select id="sleepSelect">
+              <option value="off">Off</option>
+              <option value="5">5 min</option>
+              <option value="10">10 min</option>
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+              <option value="45">45 min</option>
+              <option value="60">60 min</option>
+              <option value="track">End of track</option>
+            </select>
+            <span id="sleepState" class="muted"></span>
+          </div>
+
+          <div class="control">
+            <label><input type="checkbox" id="autoNext" /> Auto-play next lesson</label>
+          </div>
+        </div>
+
+        <section class="transcript">
+          <h3>Transcript <span id="transcriptNote" class="muted"></span></h3>
+          <pre id="transcript" class="transcript-text">Select a lesson to see its transcript.</pre>
+        </section>
+
+        <section id="pdfPanel" class="pdf-panel hidden">
+          <h3>Lesson PDF</h3>
+          <iframe id="pdfFrame" title="Lesson PDF"></iframe>
+        </section>
+      </section>
+
+      <section id="placeholder" class="card">
+        <p>Pick a lesson from the list to start playing.<br />
+        Audio, transcripts and PDFs are cached for offline use (500 MB, least-recently-used eviction).</p>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
