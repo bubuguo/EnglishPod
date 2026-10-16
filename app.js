@@ -124,6 +124,11 @@ function refreshStats() {
     });
 }
 
+// The SW broadcasts stats after caching/evicting media; keep the display live.
+navigator.serviceWorker.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'stats') updateCacheStats(e.data);
+});
+
 /* ---------------- Lesson list ---------------- */
 
 function renderLessonList(filter) {

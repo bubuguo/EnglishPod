@@ -6,7 +6,7 @@
  *   size and last-accessed timestamp. When the total media cache exceeds
  *   QUOTA bytes, the least-recently-accessed entries are evicted first.
  */
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL_CACHE = `epod-shell-${VERSION}`;
 const MEDIA_CACHE = `epod-media-${VERSION}`;
 const DB_NAME = 'epod-cache-db';
@@ -154,6 +154,7 @@ async function handleMedia(request) {
     const full = await fetch(url, { mode: 'cors' });
     if (full.ok && (full.type === 'cors' || full.type === 'basic')) {
       await putInCache(url, full.clone());
+      broadcastStats(); // keep the page's cache-usage display current
     }
     touchAccessed(url);
     if (rangeHeader && full.status === 200) return sliceResponse(full.clone(), rangeHeader);
@@ -203,18 +204,22 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (new URL(request.url).origin === self.location.origin) {
+    // Stale-while-revalidate: serve the cached copy immediately (works
+    // offline) and refresh it in the background so app updates appear
+    // on the next reload without a VERSION bump.
     event.respondWith(
-      caches.match(request).then(
-        (cached) =>
-          cached ||
-          fetch(request).then((response) => {
+      caches.match(request).then((cached) => {
+        const fetched = fetch(request)
+          .then((response) => {
             if (response.ok) {
               const clone = response.clone();
               caches.open(SHELL_CACHE).then((cache) => cache.put(request, clone));
             }
             return response;
           })
-      )
+          .catch(() => cached); // offline: keep serving the cached copy
+        return cached || fetched;
+      })
     );
   }
 });
@@ -236,30 +241,16 @@ async function cacheStats() {
   };
 }
 
-async function downloadUrls(urls) {
-  const cache = await caches.open(MEDIA_CACHE);
-  const results = [];
-  for (const url of urls) {
-    try {
-      const existing = await cache.match(new Request(url, { method: 'GET' }));
-      if (existing) {
-        await touchAccessed(url);
-        results.push({ url, ok: true, cached: true });
-      } else {
-        const resp = await fetch(url, { mode: 'cors' });
-        if (resp.ok) {
-          await putInCache(url, resp);
-          results.push({ url, ok: true });
-        } else {
-          results.push({ url, ok: false, status: resp.status });
-        }
-      }
-    } catch (err) {
-      results.push({ url, ok: false, error: String(err) });
-    }
+// Push fresh stats to every open client after a cache mutation
+// (new file cached or LRU eviction), so the UI stays current.
+async function broadcastStats() {
+  try {
+    const stats = await cacheStats();
+    const clients = await self.clients.matchAll();
+    for (const client of clients) client.postMessage(stats);
+  } catch (err) {
+    // Non-fatal: display-only.
   }
-  const stats = await cacheStats();
-  return { type: 'downloaded', results, ...stats };
 }
 
 async function clearMediaCache() {
@@ -276,9 +267,6 @@ self.addEventListener('message', (event) => {
   switch (msg.type) {
     case 'stats':
       cacheStats().then((stats) => replyTo(event, stats));
-      break;
-    case 'download':
-      downloadUrls(msg.urls || []).then((res) => replyTo(event, res));
       break;
     case 'clear':
       clearMediaCache().then((res) => replyTo(event, res));
