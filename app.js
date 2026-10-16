@@ -3,6 +3,7 @@
 
 const CATALOG_URL = './lessons.json';
 const LS_KEY = 'epod-settings';
+const ARCHIVE_BASE = 'https://archive.org/download/englishpod_all/';
 
 const $ = (id) => document.getElementById(id);
 
@@ -41,6 +42,39 @@ let sleepMode = 'off'; // 'off' | 'track' | minutes
 let sleepDeadline = 0;
 let sleepTick = null;
 let pdfObjectUrl = null;
+
+/* ---------------- Catalog helpers ---------------- */
+
+// Derive any track URL from the pb file name in the catalog:
+// englishpod_0001pb.ogg + kind -> englishpod_0001<kind>.ogg
+function trackUrl(lesson, kind) {
+  const m = /^englishpod_(\d+)(pb|dg|rv)\.ogg$/.exec(lesson.file || '');
+  return m && TRACK_LABELS[kind] ? ARCHIVE_BASE + `englishpod_${m[1]}${kind}.ogg` : null;
+}
+
+// Derive the transcript URL from the audio file name:
+// englishpod_0001pb.ogg -> englishpod_0001dg.txt
+function transcriptUrl(lesson) {
+  const m = /^englishpod_(\d+)(pb|dg|rv)\.ogg$/.exec(lesson.file || '');
+  return m ? ARCHIVE_BASE + `englishpod_${m[1]}dg.txt` : null;
+}
+
+// Derive the lesson PDF URL from the audio file name:
+// englishpod_0001pb.ogg -> englishpod_0001.pdf
+function pdfUrl(lesson) {
+  const m = /^englishpod_(\d+)(pb|dg|rv)\.ogg$/.exec(lesson.file || '');
+  return m ? ARCHIVE_BASE + `englishpod_${m[1]}.pdf` : null;
+}
+
+// "1" -> "0001"
+function lessonNum(lesson) {
+  return String(lesson.id).padStart(4, '0');
+}
+
+// "Elementary" -> "E", "Upper-Intermediate" -> "U"
+function levelInitial(lesson) {
+  return (lesson.type || '?').trim().charAt(0).toUpperCase();
+}
 
 /* ---------------- Settings persistence ---------------- */
 
@@ -108,16 +142,16 @@ function refreshStats() {
 function renderLessonList(filter) {
   const q = (filter || '').trim().toLowerCase();
   els.lessonList.innerHTML = '';
-  for (const lesson of catalog.lessons) {
-    if (q && !`${lesson.n} ${lesson.title} ${lesson.level}`.toLowerCase().includes(q)) continue;
+  for (const lesson of catalog) {
+    if (q && !`${lesson.id} ${lesson.title} ${lesson.type}`.toLowerCase().includes(q)) continue;
     const li = document.createElement('li');
     li.dataset.id = lesson.id;
     const num = document.createElement('span');
     num.className = 'num';
-    num.textContent = String(lesson.n).padStart(3, '0');
+    num.textContent = lessonNum(lesson);
     li.appendChild(num);
-    li.appendChild(document.createTextNode(lesson.title));
-    li.title = `${lesson.level} — ${lesson.title}`;
+    li.appendChild(document.createTextNode(`(${levelInitial(lesson)})${lesson.title}`));
+    li.title = `${lesson.type} — ${lesson.title}`;
     li.addEventListener('click', () => selectLesson(lesson));
     els.lessonList.appendChild(li);
   }
@@ -134,21 +168,20 @@ function markActiveLesson(id) {
 /* ---------------- Player ---------------- */
 
 function lessonUrls(lesson, trackKind) {
-  const base = catalog.base;
   const urls = [];
-  if (trackKind && lesson.audio[trackKind]) urls.push(base + lesson.audio[trackKind].file);
-  else for (const t of Object.keys(lesson.audio)) urls.push(base + lesson.audio[t].file);
-  if (lesson.txt) urls.push(base + lesson.txt.file);
-  if (lesson.pdf) urls.push(base + lesson.pdf.file);
+  const audio = trackUrl(lesson, trackKind) || trackUrl(lesson, 'pb');
+  if (audio) urls.push(audio);
+  const txt = transcriptUrl(lesson);
+  if (txt) urls.push(txt);
+  const pdf = pdfUrl(lesson);
+  if (pdf) urls.push(pdf);
   return urls;
 }
 
 function selectTrack(kind) {
   const lesson = currentLesson;
   if (!lesson) return;
-  const track = lesson.audio[kind];
-  if (!track) return;
-  const url = catalog.base + track.file;
+  const url = trackUrl(lesson, kind) || ARCHIVE_BASE + lesson.file;
   repeatCount = 0;
   updateRepeatState();
   els.audio.src = url;
@@ -164,20 +197,17 @@ function selectLesson(lesson, trackKind) {
   markActiveLesson(lesson.id);
   els.placeholder.classList.add('hidden');
   els.player.classList.remove('hidden');
-  els.lessonTitle.textContent = `${lesson.n}. ${lesson.title}`;
-  const totalLen = Object.values(lesson.audio).reduce((s, t) => s + (t.length || 0), 0);
-  els.lessonMeta.textContent = `${lesson.level} · Lesson ${lesson.n} · ${Math.round(
-    totalLen / 60
-  )} min of audio`;
+  els.lessonTitle.textContent = `${lessonNum(lesson)}. ${lesson.title}`;
+  els.lessonMeta.textContent = `${lesson.type} · Lesson ${lesson.id}`;
 
   els.trackSelect.innerHTML = '';
-  for (const kind of Object.keys(lesson.audio)) {
+  for (const kind of Object.keys(TRACK_LABELS)) {
     const opt = document.createElement('option');
     opt.value = kind;
-    opt.textContent = `${TRACK_LABELS[kind] || kind} (${formatBytes(lesson.audio[kind].size)})`;
+    opt.textContent = TRACK_LABELS[kind];
     els.trackSelect.appendChild(opt);
   }
-  els.trackSelect.value = trackKind && lesson.audio[trackKind] ? trackKind : 'pb';
+  els.trackSelect.value = trackKind && TRACK_LABELS[trackKind] ? trackKind : 'pb';
 
   loadTranscript(lesson);
   closePdf();
@@ -187,12 +217,13 @@ function selectLesson(lesson, trackKind) {
 async function loadTranscript(lesson) {
   els.transcript.textContent = 'Loading transcript…';
   els.transcriptNote.textContent = '';
-  if (!lesson.txt) {
+  const url = transcriptUrl(lesson);
+  if (!url) {
     els.transcript.textContent = 'No transcript available for this lesson.';
     return;
   }
   try {
-    const resp = await fetch(catalog.base + lesson.txt.file);
+    const resp = await fetch(url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     els.transcript.textContent = (await resp.text()).trim() || '(empty transcript)';
     els.transcriptNote.textContent = '(dialog transcript)';
@@ -209,8 +240,8 @@ function updateRepeatState() {
 
 function playNextLesson() {
   if (!currentLesson) return;
-  const idx = catalog.lessons.findIndex((l) => l.id === currentLesson.id);
-  const next = catalog.lessons[idx + 1];
+  const idx = catalog.findIndex((l) => l.id === currentLesson.id);
+  const next = catalog[idx + 1];
   if (next) selectLesson(next, els.trackSelect.value);
 }
 
@@ -296,14 +327,15 @@ els.autoNext.addEventListener('change', saveSettings);
 els.search.addEventListener('input', () => renderLessonList(els.search.value));
 
 els.btnPdf.addEventListener('click', async () => {
-  if (!currentLesson || !currentLesson.pdf) return;
+  if (!currentLesson) return;
+  const url = pdfUrl(currentLesson);
+  if (!url) return;
   if (!els.pdfPanel.classList.contains('hidden')) {
     closePdf();
     return;
   }
   els.btnPdf.disabled = true;
   try {
-    const url = catalog.base + currentLesson.pdf.file;
     const resp = await fetch(url);
     const blob = await resp.blob();
     if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl);
@@ -312,7 +344,7 @@ els.btnPdf.addEventListener('click', async () => {
     els.pdfPanel.classList.remove('hidden');
   } catch (err) {
     // Fallback: let the browser handle it directly.
-    window.open(catalog.base + currentLesson.pdf.file, '_blank');
+    window.open(url, '_blank');
   } finally {
     els.btnPdf.disabled = false;
   }
@@ -395,7 +427,7 @@ async function init() {
   } catch (err) {
     /* ignore */
   }
-  const lesson = (last && catalog.lessons.find((l) => l.id === last.id)) || catalog.lessons[0];
+  const lesson = (last && catalog.find((l) => l.id === last.id)) || catalog[0];
   selectLesson(lesson, last && last.track);
 }
 
