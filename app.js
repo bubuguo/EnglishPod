@@ -23,8 +23,6 @@ const els = {
   autoNext: $('autoNext'),
   transcript: $('transcript'),
   transcriptNote: $('transcriptNote'),
-  btnDownload: $('btnDownload'),
-  downloadState: $('downloadState'),
   cacheUsage: $('cacheUsage'),
   btnClearCache: $('btnClearCache'),
 };
@@ -155,15 +153,6 @@ function markActiveLesson(id) {
 }
 
 /* ---------------- Player ---------------- */
-
-function lessonUrls(lesson, trackKind) {
-  const urls = [];
-  const audio = trackUrl(lesson, trackKind) || trackUrl(lesson, 'pb');
-  if (audio) urls.push(audio);
-  const txt = transcriptUrl(lesson);
-  if (txt) urls.push(txt);
-  return urls;
-}
 
 function selectTrack(kind) {
   const lesson = currentLesson;
@@ -311,28 +300,6 @@ els.sleepSelect.addEventListener('change', () => {
 els.trackSelect.addEventListener('change', () => selectTrack(els.trackSelect.value));
 els.autoNext.addEventListener('change', saveSettings);
 els.search.addEventListener('input', () => renderLessonList(els.search.value));
-
-els.btnDownload.addEventListener('click', async () => {
-  if (!currentLesson) return;
-  const urls = lessonUrls(currentLesson, els.trackSelect.value);
-  els.btnDownload.disabled = true;
-  els.downloadState.textContent = 'caching…';
-  try {
-    const res = await swMessage({ type: 'download', urls });
-    const failed = (res.results || []).filter((r) => !r.ok).length;
-    els.downloadState.textContent = failed
-      ? `cached with ${failed} failure(s)`
-      : 'cached for offline ✓';
-    updateCacheStats(res);
-  } catch (err) {
-    els.downloadState.textContent = 'caching failed';
-  } finally {
-    els.btnDownload.disabled = false;
-    setTimeout(() => {
-      els.downloadState.textContent = '';
-    }, 5000);
-  }
-});
 
 els.btnClearCache.addEventListener('click', async () => {
   if (!confirm('Delete all cached audio and transcripts?')) return;
