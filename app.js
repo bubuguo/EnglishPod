@@ -23,11 +23,8 @@ const els = {
   autoNext: $('autoNext'),
   transcript: $('transcript'),
   transcriptNote: $('transcriptNote'),
-  btnPdf: $('btnPdf'),
   btnDownload: $('btnDownload'),
   downloadState: $('downloadState'),
-  pdfPanel: $('pdfPanel'),
-  pdfFrame: $('pdfFrame'),
   cacheUsage: $('cacheUsage'),
   btnClearCache: $('btnClearCache'),
 };
@@ -41,7 +38,6 @@ let repeatCount = 0;
 let sleepMode = 'off'; // 'off' | 'track' | minutes
 let sleepDeadline = 0;
 let sleepTick = null;
-let pdfObjectUrl = null;
 
 /* ---------------- Catalog helpers ---------------- */
 
@@ -57,13 +53,6 @@ function trackUrl(lesson, kind) {
 function transcriptUrl(lesson) {
   const m = /^englishpod_(\d+)(pb|dg|rv)\.ogg$/.exec(lesson.file || '');
   return m ? ARCHIVE_BASE + `englishpod_${m[1]}dg.txt` : null;
-}
-
-// Derive the lesson PDF URL from the audio file name:
-// englishpod_0001pb.ogg -> englishpod_0001.pdf
-function pdfUrl(lesson) {
-  const m = /^englishpod_(\d+)(pb|dg|rv)\.ogg$/.exec(lesson.file || '');
-  return m ? ARCHIVE_BASE + `englishpod_${m[1]}.pdf` : null;
 }
 
 // "1" -> "0001"
@@ -173,8 +162,6 @@ function lessonUrls(lesson, trackKind) {
   if (audio) urls.push(audio);
   const txt = transcriptUrl(lesson);
   if (txt) urls.push(txt);
-  const pdf = pdfUrl(lesson);
-  if (pdf) urls.push(pdf);
   return urls;
 }
 
@@ -210,7 +197,6 @@ function selectLesson(lesson, trackKind) {
   els.trackSelect.value = trackKind && TRACK_LABELS[trackKind] ? trackKind : 'pb';
 
   loadTranscript(lesson);
-  closePdf();
   selectTrack(els.trackSelect.value);
 }
 
@@ -326,35 +312,6 @@ els.trackSelect.addEventListener('change', () => selectTrack(els.trackSelect.val
 els.autoNext.addEventListener('change', saveSettings);
 els.search.addEventListener('input', () => renderLessonList(els.search.value));
 
-els.btnPdf.addEventListener('click', async () => {
-  if (!currentLesson) return;
-  const url = pdfUrl(currentLesson);
-  if (!url) return;
-  if (!els.pdfPanel.classList.contains('hidden')) {
-    closePdf();
-    return;
-  }
-  els.btnPdf.disabled = true;
-  try {
-    const resp = await fetch(url);
-    const blob = await resp.blob();
-    if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl);
-    pdfObjectUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));
-    els.pdfFrame.src = pdfObjectUrl;
-    els.pdfPanel.classList.remove('hidden');
-  } catch (err) {
-    // Fallback: let the browser handle it directly.
-    window.open(url, '_blank');
-  } finally {
-    els.btnPdf.disabled = false;
-  }
-});
-
-function closePdf() {
-  els.pdfPanel.classList.add('hidden');
-  els.pdfFrame.src = 'about:blank';
-}
-
 els.btnDownload.addEventListener('click', async () => {
   if (!currentLesson) return;
   const urls = lessonUrls(currentLesson, els.trackSelect.value);
@@ -378,7 +335,7 @@ els.btnDownload.addEventListener('click', async () => {
 });
 
 els.btnClearCache.addEventListener('click', async () => {
-  if (!confirm('Delete all cached audio, transcripts and PDFs?')) return;
+  if (!confirm('Delete all cached audio and transcripts?')) return;
   els.btnClearCache.disabled = true;
   try {
     const res = await swMessage({ type: 'clear' });

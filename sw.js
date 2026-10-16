@@ -1,7 +1,7 @@
 /* EnglishPod PWA service worker.
  *
  * - App shell: cache-first with network fallback.
- * - Media (audio / txt / pdf from archive.org): cache-first with Range
+ * - Media (audio / txt from archive.org): cache-first with Range
  *   request support. Every cache entry is tracked in IndexedDB with its
  *   size and last-accessed timestamp. When the total media cache exceeds
  *   QUOTA bytes, the least-recently-accessed entries are evicted first.

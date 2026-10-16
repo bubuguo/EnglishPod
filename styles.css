@@ -168,16 +168,6 @@ select {
   margin: 0;
 }
 
-.pdf-panel { margin-top: 1rem; }
-.pdf-panel h3 { margin: 0 0 0.5rem; font-size: 0.95rem; }
-.pdf-panel iframe {
-  width: 100%;
-  height: 60vh;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #fff;
-}
-
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .sidebar { max-height: 35vh; border-right: none; border-bottom: 1px solid var(--border); }

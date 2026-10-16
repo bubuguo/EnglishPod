@@ -37,8 +37,7 @@
             <p id="lessonMeta" class="muted">–</p>
           </div>
           <div class="lesson-actions">
-            <button id="btnDownload" type="button" title="Cache audio, transcript and PDF for offline use">⤓ Offline</button>
-            <button id="btnPdf" type="button" title="View lesson PDF (also cached)">📄 PDF</button>
+            <button id="btnDownload" type="button" title="Cache audio and transcript for offline use">⤓ Offline</button>
           </div>
         </div>
 
@@ -88,16 +87,11 @@
           <h3>Transcript <span id="transcriptNote" class="muted"></span></h3>
           <pre id="transcript" class="transcript-text">Select a lesson to see its transcript.</pre>
         </section>
-
-        <section id="pdfPanel" class="pdf-panel hidden">
-          <h3>Lesson PDF</h3>
-          <iframe id="pdfFrame" title="Lesson PDF"></iframe>
-        </section>
       </section>
 
       <section id="placeholder" class="card">
         <p>Pick a lesson from the list to start playing.<br />
-        Audio, transcripts and PDFs are cached for offline use (500 MB, least-recently-used eviction).</p>
+        Audio and transcripts are cached for offline use (500 MB, least-recently-used eviction).</p>
       </section>
     </main>
   </div>
