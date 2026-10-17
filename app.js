@@ -3,7 +3,7 @@
 
 const CATALOG_URL = './lessons.json';
 const LS_KEY = 'epod-settings';
-const ARCHIVE_BASE = 'https://archive.org/download/englishpod_all/';
+const ARCHIVE_BASE = 'https://archive.org/download/englishpod_all/'; // keep in sync with MEDIA_PREFIX in sw.js
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,6 +16,7 @@ const els = {
   lessonMeta: $('lessonMeta'),
   trackSelect: $('trackSelect'),
   audio: $('audio'),
+  audioError: $('audioError'),
   repeatSelect: $('repeatSelect'),
   repeatState: $('repeatState'),
   sleepSelect: $('sleepSelect'),
@@ -29,13 +30,119 @@ const els = {
 
 const TRACK_LABELS = { pb: 'Podcast (full lesson)', dg: 'Dialog', rv: 'Review' };
 
+/* ---------------- Player adapter ----------------
+ * All playback goes through this interface; app logic never touches the
+ * <audio> element directly. The Capacitor build will slot in a
+ * NativePlayer with the same interface — playback then runs in a native
+ * foreground service that survives the screen being locked. */
+
+class HtmlPlayer {
+  constructor(el) {
+    this.el = el;
+    this.sleepInterval = null;
+    this.listeners = { ended: [], timeupdate: [], error: [] };
+    el.addEventListener('ended', () => this.emit('ended'));
+    el.addEventListener('timeupdate', () => this.emit('timeupdate'));
+    el.addEventListener('error', () => this.emit('error'));
+    // Keep the lock-screen/notification play-pause icon in sync no matter
+    // what triggered the state change (UI, media session, end of track).
+    el.addEventListener('play', () => this._setPlaybackState('playing'));
+    el.addEventListener('pause', () => this._setPlaybackState('paused'));
+  }
+
+  _setPlaybackState(state) {
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = state;
+  }
+
+  on(evt, cb) {
+    if (this.listeners[evt]) this.listeners[evt].push(cb);
+  }
+
+  emit(evt, data) {
+    for (const cb of this.listeners[evt] || []) cb(data);
+  }
+
+  load(url, opts = {}) {
+    // Drop any pending seek from a previous load() so a slow-loading track
+    // can't seek a newly loaded one to the wrong position.
+    if (this._pendingSeek) {
+      this.el.removeEventListener('loadedmetadata', this._pendingSeek);
+      this._pendingSeek = null;
+    }
+    this.el.src = url;
+    if (opts.resumePosition > 0) {
+      const seekTo = opts.resumePosition;
+      this._pendingSeek = () => {
+        this.el.currentTime = seekTo;
+        this.el.removeEventListener('loadedmetadata', this._pendingSeek);
+        this._pendingSeek = null;
+      };
+      this.el.addEventListener('loadedmetadata', this._pendingSeek);
+    }
+    if (opts.autoplay !== false) this.play();
+  }
+
+  play() {
+    return this.el.play().catch(() => {
+      /* Autoplay may be blocked until the user interacts; controls still work. */
+    });
+  }
+
+  pause() {
+    this.el.pause();
+  }
+
+  seek(t) {
+    if (isFinite(t) && t >= 0) this.el.currentTime = t;
+  }
+
+  get position() {
+    return this.el.currentTime || 0;
+  }
+
+  get duration() {
+    return this.el.duration;
+  }
+
+  get paused() {
+    return this.el.paused;
+  }
+
+  /* The sleep timer lives in the player so a native implementation can
+   * run it inside the foreground service (reliable while screen locked). */
+  setSleepTimer(minutes, { onFire, onTick }) {
+    this.clearSleepTimer();
+    const deadline = Date.now() + minutes * 60000;
+    const tick = () => {
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        this.clearSleepTimer();
+        onFire();
+        return;
+      }
+      onTick(`${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}`);
+    };
+    tick();
+    this.sleepInterval = setInterval(tick, 1000);
+  }
+
+  clearSleepTimer() {
+    if (this.sleepInterval) {
+      clearInterval(this.sleepInterval);
+      this.sleepInterval = null;
+    }
+  }
+}
+
+const player = new HtmlPlayer(els.audio);
+
 let catalog = null;
 let currentLesson = null;
+let currentTrackUrl = null;   // url currently loaded into the player
+let confirmedTouchUrl = null; // url whose 30 s "really listened" signal was sent
 let repeatTarget = 1;
 let repeatCount = 0;
 let sleepMode = 'off'; // 'off' | 'track' | minutes
-let sleepDeadline = 0;
-let sleepTick = null;
 
 /* ---------------- Catalog helpers ---------------- */
 
@@ -69,8 +176,9 @@ function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
     if (s.repeat) els.repeatSelect.value = s.repeat;
-    if (s.sleep) els.sleepSelect.value = s.sleep;
     if (typeof s.autoNext === 'boolean') els.autoNext.checked = s.autoNext;
+    /* Sleep timer is intentionally not persisted: a restored selection
+       with no armed timer would be misleading. */
   } catch (err) {
     /* ignore corrupt settings */
   }
@@ -81,7 +189,6 @@ function saveSettings() {
     LS_KEY,
     JSON.stringify({
       repeat: els.repeatSelect.value,
-      sleep: els.sleepSelect.value,
       autoNext: els.autoNext.checked,
     })
   );
@@ -128,6 +235,9 @@ function refreshStats() {
 navigator.serviceWorker.addEventListener('message', (e) => {
   if (e.data && e.data.type === 'stats') updateCacheStats(e.data);
 });
+// On the very first load the SW only becomes controller after registration;
+// refresh stats once it takes over so the header doesn't say "unavailable".
+navigator.serviceWorker.addEventListener('controllerchange', () => refreshStats());
 
 /* ---------------- Lesson list ---------------- */
 
@@ -138,6 +248,8 @@ function renderLessonList(filter) {
     if (q && !`${lesson.id} ${lesson.title} ${lesson.type}`.toLowerCase().includes(q)) continue;
     const li = document.createElement('li');
     li.dataset.id = lesson.id;
+    li.tabIndex = 0;
+    li.setAttribute('role', 'button');
     const num = document.createElement('span');
     num.className = 'num';
     num.textContent = lessonNum(lesson);
@@ -145,6 +257,12 @@ function renderLessonList(filter) {
     li.appendChild(document.createTextNode(`(${levelInitial(lesson)})${lesson.title}`));
     li.title = `${lesson.type} — ${lesson.title}`;
     li.addEventListener('click', () => selectLesson(lesson));
+    li.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectLesson(lesson);
+      }
+    });
     els.lessonList.appendChild(li);
   }
 }
@@ -159,21 +277,22 @@ function markActiveLesson(id) {
 
 /* ---------------- Player ---------------- */
 
-function selectTrack(kind) {
+function selectTrack(kind, opts = {}) {
   const lesson = currentLesson;
   if (!lesson) return;
-  const url = trackUrl(lesson, kind) || ARCHIVE_BASE + lesson.file;
+  const url = trackUrl(lesson, kind) || (lesson.file ? ARCHIVE_BASE + lesson.file : null);
+  if (!url) return;
+  currentTrackUrl = url;
   repeatCount = 0;
   updateRepeatState();
-  els.audio.src = url;
-  els.audio.play().catch(() => {
-    /* Autoplay may be blocked until the user interacts; controls still work. */
-  });
+  els.audioError.classList.add('hidden');
+  player.load(url, opts);
   swMessage({ type: 'nowPlaying', url }).catch(() => {});
   localStorage.setItem('epod-last', JSON.stringify({ id: lesson.id, track: kind }));
+  updateMediaSession(lesson);
 }
 
-function selectLesson(lesson, trackKind) {
+function selectLesson(lesson, trackKind, opts = {}) {
   currentLesson = lesson;
   markActiveLesson(lesson.id);
   els.placeholder.classList.add('hidden');
@@ -191,10 +310,13 @@ function selectLesson(lesson, trackKind) {
   els.trackSelect.value = trackKind && TRACK_LABELS[trackKind] ? trackKind : 'pb';
 
   loadTranscript(lesson);
-  selectTrack(els.trackSelect.value);
+  selectTrack(els.trackSelect.value, opts);
 }
 
+let transcriptSeq = 0; // guards against stale responses overwriting newer ones
+
 async function loadTranscript(lesson) {
+  const seq = ++transcriptSeq;
   els.transcript.textContent = 'Loading transcript…';
   els.transcriptNote.textContent = '';
   const url = transcriptUrl(lesson);
@@ -204,10 +326,14 @@ async function loadTranscript(lesson) {
   }
   try {
     const resp = await fetch(url);
+    if (seq !== transcriptSeq) return; // user moved on to another lesson
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    els.transcript.textContent = (await resp.text()).trim() || '(empty transcript)';
+    const text = (await resp.text()).trim() || '(empty transcript)';
+    if (seq !== transcriptSeq) return;
+    els.transcript.textContent = text;
     els.transcriptNote.textContent = '(dialog transcript)';
   } catch (err) {
+    if (seq !== transcriptSeq) return;
     els.transcript.textContent = 'Failed to load transcript: ' + err.message;
   }
 }
@@ -225,6 +351,13 @@ function playNextLesson() {
   if (next) selectLesson(next, els.trackSelect.value);
 }
 
+function playPrevLesson() {
+  if (!currentLesson) return;
+  const idx = catalog.findIndex((l) => l.id === currentLesson.id);
+  const prev = catalog[idx - 1];
+  if (prev) selectLesson(prev, els.trackSelect.value);
+}
+
 /* ---------------- Repeat ---------------- */
 
 els.repeatSelect.addEventListener('change', () => {
@@ -235,7 +368,9 @@ els.repeatSelect.addEventListener('change', () => {
   saveSettings();
 });
 
-els.audio.addEventListener('ended', () => {
+/* ---------------- Player events ---------------- */
+
+player.on('ended', () => {
   if (sleepMode === 'track') {
     stopSleepTimer('Stopped at end of track');
     return;
@@ -243,54 +378,110 @@ els.audio.addEventListener('ended', () => {
   repeatCount += 1;
   if (repeatCount < repeatTarget) {
     updateRepeatState();
-    els.audio.currentTime = 0;
-    els.audio.play().catch(() => {});
+    player.seek(0);
+    player.play();
     return;
   }
   updateRepeatState();
   if (els.autoNext.checked) playNextLesson();
 });
 
+player.on('error', () => {
+  els.audioError.textContent =
+    'Audio failed to load — check your connection or try another track.';
+  els.audioError.classList.remove('hidden');
+});
+
+/* Confirm "really listened" after 30 s of continuous playback: only then is
+ * the cache entry's access timestamp refreshed, so briefly-opened lessons
+ * stay evictable under the LRU quota. Fired at most once per track load. */
+player.on('timeupdate', () => {
+  if (!currentTrackUrl || confirmedTouchUrl === currentTrackUrl) return;
+  if (player.position > 30) {
+    confirmedTouchUrl = currentTrackUrl;
+    swMessage({ type: 'touch', url: currentTrackUrl }).catch(() => {});
+  }
+});
+
+/* ---------------- Media Session (lock-screen controls) ---------------- */
+
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  const set = (name, fn) => {
+    try {
+      navigator.mediaSession.setActionHandler(name, fn);
+    } catch (err) {
+      /* handler not supported on this platform */
+    }
+  };
+  set('play', () => player.play());
+  set('pause', () => player.pause());
+  set('previoustrack', playPrevLesson);
+  set('nexttrack', playNextLesson);
+  set('seekbackward', (d) => player.seek(player.position - ((d && d.seekOffset) || 10)));
+  set('seekforward', (d) => player.seek(player.position + ((d && d.seekOffset) || 10)));
+  set('seekto', (d) => {
+    if (d && typeof d.seekTime === 'number') player.seek(d.seekTime);
+  });
+}
+
+function updateMediaSession(lesson) {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: `${lessonNum(lesson)}. ${lesson.title}`,
+    artist: lesson.type,
+    album: 'EnglishPod',
+    artwork: [{ src: './icons/icon-512.png', sizes: '512x512', type: 'image/png' }],
+  });
+}
+
+let lastPosState = 0;
+player.on('timeupdate', () => {
+  const now = Date.now();
+  if (now - lastPosState < 5000) return; // throttle wakeups
+  lastPosState = now;
+  if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return;
+  const d = player.duration;
+  if (!isFinite(d) || d <= 0) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: d,
+      position: Math.min(player.position, d),
+      playbackRate: 1,
+    });
+  } catch (err) {
+    /* non-fatal */
+  }
+});
+
 /* ---------------- Sleep timer ---------------- */
 
 function stopSleepTimer(message) {
-  clearInterval(sleepTick);
-  sleepTick = null;
+  player.clearSleepTimer();
   sleepMode = 'off';
-  sleepDeadline = 0;
   els.sleepSelect.value = 'off';
   els.sleepState.textContent = message || '';
-  els.audio.pause();
+  player.pause();
 }
 
 function startSleepTimer(minutes) {
-  clearInterval(sleepTick);
-  sleepMode = minutes;
-  sleepDeadline = Date.now() + minutes * 60000;
-  const update = () => {
-    const left = sleepDeadline - Date.now();
-    if (left <= 0) {
-      stopSleepTimer('Sleep timer: stopped');
-      return;
-    }
-    const m = Math.floor(left / 60000);
-    const s = Math.floor((left % 60000) / 1000);
-    els.sleepState.textContent = `stops in ${m}:${String(s).padStart(2, '0')}`;
-  };
-  update();
-  sleepTick = setInterval(update, 1000);
+  sleepMode = String(minutes);
+  player.setSleepTimer(minutes, {
+    onFire: () => stopSleepTimer('Sleep timer: stopped'),
+    onTick: (left) => {
+      els.sleepState.textContent = `stops in ${left}`;
+    },
+  });
 }
 
 els.sleepSelect.addEventListener('change', () => {
   const v = els.sleepSelect.value;
   if (v === 'off') {
-    clearInterval(sleepTick);
-    sleepTick = null;
+    player.clearSleepTimer();
     sleepMode = 'off';
     els.sleepState.textContent = '';
   } else if (v === 'track') {
-    clearInterval(sleepTick);
-    sleepTick = null;
+    player.clearSleepTimer();
     sleepMode = 'track';
     els.sleepState.textContent = 'stops after this track';
   } else {
@@ -321,15 +512,41 @@ els.btnClearCache.addEventListener('click', async () => {
 
 /* Save playback position so it can be resumed later. */
 setInterval(() => {
-  if (currentLesson && !els.audio.paused && els.audio.currentTime > 0) {
+  if (currentLesson && !player.paused && player.position > 0) {
     localStorage.setItem(
       'epod-position',
-      JSON.stringify({ id: currentLesson.id, t: els.audio.currentTime })
+      JSON.stringify({ id: currentLesson.id, track: els.trackSelect.value, t: player.position })
     );
   }
-}, 5000);
+}, 60000);
 
 /* ---------------- Init ---------------- */
+
+async function loadCatalog() {
+  try {
+    const resp = await fetch(CATALOG_URL);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    catalog = await resp.json();
+    try {
+      localStorage.setItem('epod-catalog', JSON.stringify(catalog));
+    } catch (err) {
+      /* storage full — non-fatal */
+    }
+  } catch (err) {
+    // Offline first visit or fetch failure: fall back to the mirrored copy.
+    const cached = localStorage.getItem('epod-catalog');
+    if (cached) {
+      try {
+        catalog = JSON.parse(cached);
+        console.warn('Using cached catalog:', err);
+      } catch (parseErr) {
+        throw err; // corrupt mirror — report the original failure
+      }
+    } else {
+      throw err;
+    }
+  }
+}
 
 async function init() {
   loadSettings();
@@ -344,12 +561,12 @@ async function init() {
     }
   }
 
-  const resp = await fetch(CATALOG_URL);
-  catalog = await resp.json();
+  setupMediaSession();
+  await loadCatalog();
   renderLessonList('');
   refreshStats();
 
-  // Restore last played lesson if present in the list.
+  // Restore last played lesson (and position) if present in the list.
   let last = null;
   try {
     last = JSON.parse(localStorage.getItem('epod-last') || 'null');
@@ -357,7 +574,17 @@ async function init() {
     /* ignore */
   }
   const lesson = (last && catalog.find((l) => l.id === last.id)) || catalog[0];
-  selectLesson(lesson, last && last.track);
+
+  let resume = 0;
+  try {
+    const pos = JSON.parse(localStorage.getItem('epod-position') || 'null');
+    if (pos && pos.id === lesson.id && (!last || !last.track || pos.track === last.track)) {
+      resume = pos.t || 0;
+    }
+  } catch (err) {
+    /* ignore */
+  }
+  selectLesson(lesson, last && last.track, resume > 5 ? { resumePosition: resume } : {});
 }
 
 init().catch((err) => {

@@ -1,10 +1,13 @@
 {
+  "id": "./",
   "name": "EnglishPod Player",
   "short_name": "EnglishPod",
   "description": "Self-hosted PWA to play EnglishPod lessons from archive.org with transcripts, offline caching, repeat and sleep timer.",
+  "lang": "en",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
   "icons": [

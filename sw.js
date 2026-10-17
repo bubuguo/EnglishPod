@@ -29,25 +29,45 @@ let nowPlayingUrl = null; // protected from eviction while in use
 
 /* ---------------- IndexedDB helpers ---------------- */
 
+let dbPromise = null; // opened once, reused for the SW's lifetime
+
 function idb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(DB_STORE)) {
-        db.createObjectStore(DB_STORE, { keyPath: 'url' });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(DB_STORE)) {
+          db.createObjectStore(DB_STORE, { keyPath: 'url' });
+        }
+      };
+      req.onerror = () => {
+        dbPromise = null; // transient open failure — allow retry on next call
+        reject(req.error);
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        // Drop the memo if the connection is closed under us
+        // (versionchange from another client, storage pressure).
+        db.onclose = () => {
+          dbPromise = null;
+        };
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        resolve(db);
+      };
+    });
+  }
+  return dbPromise;
 }
 
 function idbRequest(db, mode, fn) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(DB_STORE, mode);
     const result = fn(tx.objectStore(DB_STORE));
-    tx.oncomplete = () => resolve(result && result.result !== undefined ? result.result : result);
+    tx.oncomplete = () => resolve(result.result);
     tx.onerror = () => reject(tx.error);
   });
 }
@@ -60,6 +80,9 @@ const idbClear = () => idb().then((db) => idbRequest(db, 'readwrite', (s) => s.c
 
 /* ---------------- Media cache with LRU eviction ---------------- */
 
+// Refresh an entry's last-accessed timestamp. Called when the page reports
+// 30 s of continuous playback for a URL — fetching alone does not count as
+// "accessing", so briefly-opened lessons stay evictable.
 async function touchAccessed(url) {
   try {
     const entry = await idbGet(url);
@@ -121,25 +144,32 @@ function parseRange(header, size) {
   return { start, end };
 }
 
-function sliceResponse(response, rangeHeader) {
-  return response.arrayBuffer().then((buf) => {
-    const size = buf.byteLength;
-    const range = parseRange(rangeHeader, size);
-    const headers = {
-      'Content-Type': response.headers.get('content-type') || 'application/octet-stream',
-      'Accept-Ranges': 'bytes',
-    };
-    if (!range) {
-      headers['Content-Length'] = String(size);
-      return new Response(buf, { status: 200, headers });
-    }
-    headers['Content-Range'] = `bytes ${range.start}-${range.end}/${size}`;
-    headers['Content-Length'] = String(range.end - range.start + 1);
-    return new Response(buf.slice(range.start, range.end + 1), {
-      status: 206,
-      statusText: 'Partial Content',
-      headers,
-    });
+let playingBuffer = null; // { url, buf } — avoid re-reading the whole file per range request
+
+async function sliceResponse(response, rangeHeader, url) {
+  let buf;
+  if (playingBuffer && playingBuffer.url === url) {
+    buf = playingBuffer.buf;
+  } else {
+    buf = await response.arrayBuffer();
+    playingBuffer = { url, buf };
+  }
+  const size = buf.byteLength;
+  const range = parseRange(rangeHeader, size);
+  const headers = {
+    'Content-Type': response.headers.get('content-type') || 'application/octet-stream',
+    'Accept-Ranges': 'bytes',
+  };
+  if (!range) {
+    headers['Content-Length'] = String(size);
+    return new Response(buf, { status: 200, headers });
+  }
+  headers['Content-Range'] = `bytes ${range.start}-${range.end}/${size}`;
+  headers['Content-Length'] = String(range.end - range.start + 1);
+  return new Response(buf.slice(range.start, range.end + 1), {
+    status: 206,
+    statusText: 'Partial Content',
+    headers,
   });
 }
 
@@ -150,19 +180,25 @@ async function handleMedia(request) {
   let cached = await cache.match(new Request(url, { method: 'GET' }));
 
   if (!cached) {
-    // Fetch the full resource (no Range header) so it can be cached whole.
-    const full = await fetch(url, { mode: 'cors' });
-    if (full.ok && (full.type === 'cors' || full.type === 'basic')) {
-      await putInCache(url, full.clone());
-      broadcastStats(); // keep the page's cache-usage display current
+    try {
+      // Fetch the full resource (no Range header) so it can be cached whole.
+      const full = await fetch(url, { mode: 'cors' });
+      if (full.ok && (full.type === 'cors' || full.type === 'basic')) {
+        await putInCache(url, full.clone());
+        broadcastStats(); // keep the page's cache-usage display current
+      }
+      if (rangeHeader && full.status === 200) return sliceResponse(full.clone(), rangeHeader, url);
+      return full;
+    } catch (err) {
+      // Offline and not cached: fail cleanly instead of an opaque network error.
+      return new Response('media unavailable: ' + err, {
+        status: 504,
+        statusText: 'Offline',
+      });
     }
-    touchAccessed(url);
-    if (rangeHeader && full.status === 200) return sliceResponse(full.clone(), rangeHeader);
-    return full;
   }
 
-  touchAccessed(url);
-  if (rangeHeader) return sliceResponse(cached.clone(), rangeHeader);
+  if (rangeHeader) return sliceResponse(cached.clone(), rangeHeader, url);
   return cached;
 }
 
@@ -254,6 +290,7 @@ async function broadcastStats() {
 }
 
 async function clearMediaCache() {
+  playingBuffer = null; // drop the in-memory slice buffer too
   const cache = await caches.open(MEDIA_CACHE);
   const keys = await cache.keys();
   await Promise.all(keys.map((req) => cache.delete(req)));
@@ -274,6 +311,11 @@ self.addEventListener('message', (event) => {
     case 'nowPlaying':
       nowPlayingUrl = msg.url || null;
       replyTo(event, { type: 'nowPlaying', url: nowPlayingUrl });
+      break;
+    case 'touch':
+      // Page confirmed 30 s of playback for this URL — refresh its LRU ts.
+      touchAccessed(msg.url);
+      replyTo(event, { type: 'touched', url: msg.url || null });
       break;
     default:
       break;
