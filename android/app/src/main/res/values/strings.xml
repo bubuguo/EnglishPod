@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">EnglishPod Player</string>
+    <string name="title_activity_main">EnglishPod Player</string>
+    <string name="package_name">io.github.bubuguo.englishpod</string>
+    <string name="custom_url_scheme">io.github.bubuguo.englishpod</string>
+</resources>

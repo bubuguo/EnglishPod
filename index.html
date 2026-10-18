@@ -46,6 +46,13 @@
         <audio id="audio" controls preload="metadata"></audio>
         <p id="audioError" class="muted hidden" role="alert"></p>
 
+        <div id="nativeBar" class="native-bar hidden">
+          <button id="btnPlayPause" type="button" aria-label="Play or pause">▶</button>
+          <span id="curTime" class="time">0:00</span>
+          <input id="seekBar" type="range" min="0" max="1000" value="0" aria-label="Seek" />
+          <span id="durTime" class="time">0:00</span>
+        </div>
+
         <div class="controls">
           <div class="control">
             <label for="repeatSelect">Repeat</label>

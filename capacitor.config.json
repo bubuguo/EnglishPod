@@ -1,0 +1,7 @@
+{
+  "appId": "io.github.bubuguo.englishpod",
+  "appName": "EnglishPod Player",
+  "webDir": "www",
+  "android": { "allowMixedContent": false },
+  "server": { "androidScheme": "https" }
+}

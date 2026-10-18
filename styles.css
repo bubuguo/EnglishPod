@@ -139,6 +139,35 @@ select {
 
 #audio { width: 100%; margin: 0.5rem 0 0.75rem; }
 
+.native-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.native-bar button {
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.native-bar .time {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 2.6rem;
+  text-align: center;
+}
+
+.native-bar input[type='range'] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;

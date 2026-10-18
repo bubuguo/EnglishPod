@@ -1,0 +1,17 @@
+{
+  "name": "englishpod-player",
+  "version": "1.0.0",
+  "description": "A self-hosted Progressive Web App for playing the [EnglishPod lesson archive](https://archive.org/download/englishpod_all) (365 lessons) hosted on archive.org. Deployed as a static site (e.g. GitHub Pages) — no backend required.",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^7.6.9",
+    "@capacitor/core": "^8.5.3"
+  }
+}

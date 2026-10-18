@@ -17,6 +17,11 @@ const els = {
   trackSelect: $('trackSelect'),
   audio: $('audio'),
   audioError: $('audioError'),
+  nativeBar: $('nativeBar'),
+  btnPlayPause: $('btnPlayPause'),
+  seekBar: $('seekBar'),
+  curTime: $('curTime'),
+  durTime: $('durTime'),
   repeatSelect: $('repeatSelect'),
   repeatState: $('repeatState'),
   sleepSelect: $('sleepSelect'),
@@ -134,7 +139,154 @@ class HtmlPlayer {
   }
 }
 
-const player = new HtmlPlayer(els.audio);
+/* True inside the Capacitor Android app (not in a plain browser). */
+function CapacitorIsNative() {
+  return typeof window.Capacitor !== 'undefined' &&
+    typeof window.Capacitor.isNativePlatform === 'function' &&
+    window.Capacitor.isNativePlatform();
+}
+
+/* Native adapter backed by the AudioPlayer plugin (PlayerService: ExoPlayer
+ * in a foreground MediaSessionService). Same interface as HtmlPlayer, so all
+ * app logic (repeat, auto-next, transcript, media session fallback) works
+ * unchanged. Playback — including track switching and the sleep timer — runs
+ * natively and keeps working while the screen is locked.
+ * Timing model: the native side is the source of truth. It pushes 1 Hz
+ * 'progress' events (relayed as 'timeupdate') and fires the sleep timer
+ * itself; this adapter only mirrors state and renders the countdown. */
+class NativePlayer {
+  constructor() {
+    this.position = 0;
+    this.duration = 0;
+    this.paused = true;
+    this.listeners = { ended: [], timeupdate: [], error: [], stateChanged: [], sleepFired: [] };
+    this.sleepTick = null;
+    const P = window.Capacitor.Plugins.AudioPlayer;
+    P.addListener('progress', (d) => {
+      this.position = d.position || 0;
+      this.duration = d.duration || 0;
+      this.emit('timeupdate');
+    });
+    P.addListener('stateChanged', (d) => {
+      this.paused = !d.playing;
+      this.emit('stateChanged', d);
+    });
+    P.addListener('ended', () => this.emit('ended'));
+    P.addListener('error', (d) => this.emit('error', d));
+    P.addListener('sleepFired', () => {
+      this.clearSleepTimer();
+      this.emit('sleepFired');
+      if (this._onFire) this._onFire();
+    });
+    this.P = P;
+  }
+
+  on(evt, cb) {
+    if (this.listeners[evt]) this.listeners[evt].push(cb);
+  }
+
+  emit(evt, data) {
+    for (const cb of this.listeners[evt] || []) cb(data);
+  }
+
+  load(url, opts = {}) {
+    this.position = opts.resumePosition || 0;
+    this.duration = 0;
+    this.paused = false; // assume autoplay; corrected by the next stateChanged
+    this.P.loadTrack({
+      url,
+      title: opts.title || '',
+      artist: opts.artist || '',
+      startPositionMs: Math.round((opts.resumePosition || 0) * 1000),
+      autoplay: opts.autoplay !== false,
+    });
+  }
+
+  play() {
+    this.P.play();
+  }
+
+  pause() {
+    this.P.pause();
+  }
+
+  seek(t) {
+    if (isFinite(t) && t >= 0) this.P.seek({ ms: Math.round(t * 1000) });
+  }
+
+  /* Native fires exactly on time (Handler in the foreground service); the
+   * 1 Hz interval here only renders the countdown while the screen is on. */
+  setSleepTimer(minutes, { onFire, onTick }) {
+    this.clearSleepTimer();
+    this._onFire = onFire;
+    const deadline = Date.now() + minutes * 60000;
+    this.sleepTick = setInterval(() => {
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        // Native onSleepFired will arrive too; this is the display catch-up.
+        onTick('0:00');
+        return;
+      }
+      onTick(`${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}`);
+    }, 1000);
+    this.P.setSleepTimer({ minutes });
+  }
+
+  clearSleepTimer() {
+    if (this.sleepTick) {
+      clearInterval(this.sleepTick);
+      this.sleepTick = null;
+    }
+    this.P.clearSleepTimer();
+  }
+}
+
+// Feature-detect the native plugin; fall back to the HTML5 audio element
+// in the browser/PWA. Must come after both class declarations (no hoisting).
+const IS_NATIVE = CapacitorIsNative();
+const player = IS_NATIVE ? new NativePlayer() : new HtmlPlayer(els.audio);
+
+/* In native mode the <audio> element is decoupled from the real player
+ * (playback happens in PlayerService), so hide it and drive a custom bar
+ * from the adapter's events instead. */
+function fmtTime(sec) {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+}
+
+let seekDragging = false;
+
+function setupNativeBar() {
+  if (!IS_NATIVE) return;
+  els.audio.classList.add('hidden');
+  els.nativeBar.classList.remove('hidden');
+
+  els.btnPlayPause.addEventListener('click', () => {
+    if (player.paused) player.play();
+    else player.pause();
+  });
+
+  els.seekBar.addEventListener('input', () => {
+    seekDragging = true;
+    els.curTime.textContent = fmtTime((els.seekBar.value / 1000) * player.duration);
+  });
+  els.seekBar.addEventListener('change', () => {
+    player.seek((els.seekBar.value / 1000) * player.duration);
+    seekDragging = false;
+  });
+
+  player.on('timeupdate', () => {
+    els.curTime.textContent = fmtTime(player.position);
+    els.durTime.textContent = fmtTime(player.duration);
+    if (!seekDragging && player.duration > 0) {
+      els.seekBar.value = Math.round((player.position / player.duration) * 1000);
+    }
+  });
+  player.on('stateChanged', () => {
+    els.btnPlayPause.textContent = player.paused ? '▶' : '⏸';
+  });
+  els.btnPlayPause.textContent = player.paused ? '▶' : '⏸';
+}
 
 let catalog = null;
 let currentLesson = null;
@@ -286,7 +438,11 @@ function selectTrack(kind, opts = {}) {
   repeatCount = 0;
   updateRepeatState();
   els.audioError.classList.add('hidden');
-  player.load(url, opts);
+  player.load(url, {
+    ...opts,
+    title: `${lessonNum(lesson)}. ${lesson.title}`,
+    artist: lesson.type || 'EnglishPod',
+  });
   swMessage({ type: 'nowPlaying', url }).catch(() => {});
   localStorage.setItem('epod-last', JSON.stringify({ id: lesson.id, track: kind }));
   updateMediaSession(lesson);
@@ -406,7 +562,9 @@ player.on('timeupdate', () => {
 /* ---------------- Media Session (lock-screen controls) ---------------- */
 
 function setupMediaSession() {
-  if (!('mediaSession' in navigator)) return;
+  // Native builds get lock-screen controls from PlayerService's MediaSession;
+  // the WebView session would be idle and redundant.
+  if (CapacitorIsNative() || !('mediaSession' in navigator)) return;
   const set = (name, fn) => {
     try {
       navigator.mediaSession.setActionHandler(name, fn);
@@ -562,6 +720,7 @@ async function init() {
   }
 
   setupMediaSession();
+  setupNativeBar();
   await loadCatalog();
   renderLessonList('');
   refreshStats();
