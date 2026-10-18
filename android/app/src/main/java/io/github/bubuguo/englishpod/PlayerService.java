@@ -1,10 +1,17 @@
 package io.github.bubuguo.englishpod;
 
+import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
+
+import androidx.core.content.ContextCompat;
 
 import java.io.File;
 import java.util.concurrent.ExecutorService;
@@ -12,6 +19,7 @@ import java.util.concurrent.Executors;
 
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
+import androidx.media3.common.ForwardingPlayer;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.PlaybackException;
@@ -59,26 +67,92 @@ public class PlayerService extends MediaSessionService {
 
     public ExoPlayer player;
     private MediaSession session;
+    private PowerManager powerManager;
     private DataSource.Factory cachedFactory;
     private final ExecutorService precacheExecutor = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable sleepRunnable;
+    private BroadcastReceiver screenReceiver;
 
-    // 1 Hz progress ticks while playing; drives the JS timeupdate path.
+    /** > 0 while MainActivity is resumed (reported via setActivityResumed). */
+    private static int resumedActivities = 0;
+
+    // 1 Hz progress ticks while playing AND the UI is visible; drives the JS
+    // timeupdate path. The chain only exists while the UI can show it: it is
+    // stopped when the screen turns off or the app is hidden, and restarted
+    // with an immediate position push when either returns (see the SCREEN_ON/
+    // OFF receiver and setActivityResumed).
     private final Runnable progressRunnable = new Runnable() {
         @Override
         public void run() {
-            if (player != null && events != null) {
+            if (player != null && events != null && player.isPlaying()) {
                 events.onProgress(player.getCurrentPosition(), player.getDuration());
-                if (player.isPlaying()) handler.postDelayed(this, 1000);
+                handler.postDelayed(this, 1000);
             }
         }
     };
+
+    /** True when the UI can actually be seen: screen on AND app foregrounded. */
+    private boolean uiVisible() {
+        return powerManager.isInteractive() && resumedActivities > 0;
+    }
+
+    private void startProgressTicks() {
+        handler.removeCallbacks(progressRunnable); // de-dupe rapid pause->play
+        if (player != null && player.isPlaying()) {
+            handler.postDelayed(progressRunnable, 1000);
+        }
+    }
+
+    private void stopProgressTicks() {
+        handler.removeCallbacks(progressRunnable);
+    }
+
+    /** Called from MainActivity.onResume/onPause. The service may be created
+     *  after the activity already resumed, so visibility is tracked here
+     *  rather than via lifecycle callbacks registered in onCreate. */
+    public static void setActivityResumed(boolean resumed) {
+        resumedActivities = Math.max(0, resumedActivities + (resumed ? 1 : -1));
+        PlayerService svc = instance;
+        if (svc == null) return;
+        if (resumed) {
+            // Back in the foreground: push a fresh position immediately, then
+            // resume the 1 Hz ticks.
+            if (svc.player != null && events != null && svc.player.isPlaying()) {
+                events.onProgress(svc.player.getCurrentPosition(), svc.player.getDuration());
+            }
+            svc.startProgressTicks();
+        } else {
+            svc.stopProgressTicks();
+        }
+    }
 
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
+        powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+        // Screen on/off while foregrounded: no lifecycle event fires when the
+        // display turns off, so listen explicitly. On SCREEN_OFF the tick
+        // chain stops entirely; on SCREEN_ON a fresh position is pushed
+        // immediately and ticks resume.
+        screenReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
+                    if (player != null && events != null && player.isPlaying() && uiVisible()) {
+                        events.onProgress(player.getCurrentPosition(), player.getDuration());
+                    }
+                    startProgressTicks();
+                } else if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
+                    stopProgressTicks();
+                }
+            }
+        };
+        ContextCompat.registerReceiver(this, screenReceiver,
+                new IntentFilter(Intent.ACTION_SCREEN_ON) {{
+                    addAction(Intent.ACTION_SCREEN_OFF);
+                }}, ContextCompat.RECEIVER_NOT_EXPORTED);
         // Read-through media cache: every byte ExoPlayer downloads is written
         // into SimpleCache; LeastRecentlyUsedCacheEvictor enforces the 500 MB
         // quota by deleting the least-recently-used spans first. Cached
@@ -117,12 +191,26 @@ public class PlayerService extends MediaSessionService {
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
                 if (events != null) events.onStateChanged(isPlaying);
-                if (isPlaying) handler.postDelayed(progressRunnable, 1000);
+                if (isPlaying) {
+                    // Start ticks only when the UI is visible; playback that
+                    // (re)starts hidden or screen-off gets its ticks when
+                    // visibility returns.
+                    if (uiVisible()) startProgressTicks();
+                    else stopProgressTicks();
+                }
             }
 
             @Override
             public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_ENDED && events != null) events.onEnded();
+                if (state == Player.STATE_ENDED) {
+                    // Pause at end-of-track: with playWhenReady still true,
+                    // STATE_ENDED would hold the wake lock (and the foreground
+                    // service) indefinitely — a classic battery drain. Repeat
+                    // and auto-next are unaffected: JS re-engages playback via
+                    // seek(0)+play() or load().
+                    if (player != null) player.pause();
+                    if (events != null) events.onEnded();
+                }
             }
 
             @Override
@@ -132,12 +220,32 @@ public class PlayerService extends MediaSessionService {
                 }
             }
         });
-        session = new MediaSession.Builder(this, player).build();
+        // Wrap the player so every play() path (lock-screen notification,
+        // media controllers) restarts from the beginning at end-of-track —
+        // ExoPlayer alone would stay STATE_ENDED on play().
+        Player sessionPlayer = new ForwardingPlayer(player) {
+            @Override
+            public void play() {
+                if (player.getPlaybackState() == Player.STATE_ENDED) player.seekTo(0);
+                super.play();
+            }
+        };
+        session = new MediaSession.Builder(this, sessionPlayer).build();
     }
 
     @Override
     public MediaSession onGetSession(MediaSession.ControllerInfo controllerInfo) {
         return session;
+    }
+
+    /** play() that restarts from the beginning at end-of-track. ExoPlayer
+     *  alone would stay STATE_ENDED on play() (unlike HTML5 audio, which
+     *  restarts); users expect play-at-end to replay. Covers the JS bridge
+     *  path; the lock-screen play button is handled by the MediaSession
+     *  callback below. */
+    public void play() {
+        if (player.getPlaybackState() == Player.STATE_ENDED) player.seekTo(0);
+        player.play();
     }
 
     public void load(String url, String title, String artist, int startPositionMs, boolean autoplay) {
@@ -215,7 +323,12 @@ public class PlayerService extends MediaSessionService {
     @Override
     public void onDestroy() {
         clearSleepTimer();
+        stopProgressTicks();
         precacheExecutor.shutdownNow();
+        if (screenReceiver != null) {
+            unregisterReceiver(screenReceiver);
+            screenReceiver = null;
+        }
         if (session != null) {
             session.release();
             session = null;

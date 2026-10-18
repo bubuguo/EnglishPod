@@ -161,7 +161,16 @@ class NativePlayer {
     this.paused = true;
     this.listeners = { ended: [], timeupdate: [], error: [], stateChanged: [], sleepFired: [] };
     this.sleepTick = null;
+    this._pendingLoad = null; // loadTrack that failed while backgrounded
     const P = window.Capacitor.Plugins.AudioPlayer;
+    // If a load was rejected because the service couldn't start (app briefly
+    // backgrounded at launch), retry it as soon as the app is active again.
+    const App = window.Capacitor.Plugins.App;
+    if (App && App.addListener) {
+      App.addListener('appStateChange', (state) => {
+        if (state.isActive) this._retryPendingLoad();
+      });
+    }
     P.addListener('progress', (d) => {
       this.position = d.position || 0;
       this.duration = d.duration || 0;
@@ -189,20 +198,38 @@ class NativePlayer {
     for (const cb of this.listeners[evt] || []) cb(data);
   }
 
+  _retryPendingLoad() {
+    if (!this._pendingLoad) return;
+    const params = this._pendingLoad;
+    this._pendingLoad = null;
+    this.P.loadTrack(params).catch(() => {
+      this._pendingLoad = params; // still unavailable — keep for the next retry
+    });
+  }
+
   load(url, opts = {}) {
     this.position = opts.resumePosition || 0;
     this.duration = 0;
     this.paused = false; // assume autoplay; corrected by the next stateChanged
-    this.P.loadTrack({
+    const params = {
       url,
       title: opts.title || '',
       artist: opts.artist || '',
       startPositionMs: Math.round((opts.resumePosition || 0) * 1000),
       autoplay: opts.autoplay !== false,
+    };
+    this.P.loadTrack(params).catch(() => {
+      // Service couldn't start (app backgrounded at launch): remember the
+      // load and retry on the next play() or when the app becomes active.
+      this._pendingLoad = params;
     });
   }
 
   play() {
+    if (this._pendingLoad) {
+      this._retryPendingLoad(); // the pending load implies autoplay
+      return;
+    }
     this.P.play();
   }
 
@@ -564,9 +591,11 @@ player.on('ended', () => {
   if (els.autoNext.checked) playNextLesson();
 });
 
-player.on('error', () => {
+player.on('error', (d) => {
   els.audioError.textContent =
-    'Audio failed to load — check your connection or try another track.';
+    'Audio failed to load' +
+    (d && d.message ? ` (${d.message})` : '') +
+    ' — check your connection or try another track.';
   els.audioError.classList.remove('hidden');
 });
 
@@ -606,6 +635,7 @@ function setupMediaSession() {
 }
 
 function updateMediaSession(lesson) {
+  if (IS_NATIVE) return; // native lock-screen metadata comes from PlayerService
   if (!('mediaSession' in navigator)) return;
   navigator.mediaSession.metadata = new MediaMetadata({
     title: `${lessonNum(lesson)}. ${lesson.title}`,
@@ -617,6 +647,7 @@ function updateMediaSession(lesson) {
 
 let lastPosState = 0;
 player.on('timeupdate', () => {
+  if (IS_NATIVE) return; // the native MediaSession tracks position itself
   const now = Date.now();
   if (now - lastPosState < 5000) return; // throttle wakeups
   lastPosState = now;

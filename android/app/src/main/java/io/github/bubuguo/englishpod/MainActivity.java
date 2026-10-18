@@ -12,5 +12,19 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(AudioPlugin.class);
         super.onCreate(savedInstanceState);
     }
+
+    // Report visibility to PlayerService so progress ticks only run while the
+    // UI can show them (and resume with an immediate position push).
+    @Override
+    public void onResume() {
+        super.onResume();
+        PlayerService.setActivityResumed(true);
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        PlayerService.setActivityResumed(false);
+    }
 }
 

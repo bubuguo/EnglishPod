@@ -65,7 +65,15 @@ public class AudioPlugin extends Plugin implements PlayerService.EventsListener 
                 PlayerService s = PlayerService.instance;
                 if (s != null) {
                     action.run(s, call);
-                } else if (++tries[0] < 100) { // 100 x 50 ms = 5 s
+                    return;
+                }
+                tries[0]++;
+                // Retry the start periodically: the first attempt may have been
+                // rejected (BackgroundServiceStartNotAllowedException) while
+                // the app was briefly backgrounded; once it is foregrounded
+                // again the retry succeeds and the pending call recovers.
+                if (tries[0] % 20 == 0) ensureServiceStarted();
+                if (tries[0] < 100) { // 100 x 50 ms = 5 s
                     main.postDelayed(this, 50);
                 } else {
                     call.reject("player service unavailable");
@@ -94,7 +102,7 @@ public class AudioPlugin extends Plugin implements PlayerService.EventsListener 
 
     @PluginMethod
     public void play(final PluginCall call) {
-        withService(call, (svc, c) -> svc.player.play());
+        withService(call, (svc, c) -> svc.play());
         call.resolve();
     }
 
