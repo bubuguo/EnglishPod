@@ -43,6 +43,27 @@ tools/
   make_icons.py       Regenerates the PNG icons (pure stdlib)
 ```
 
+## Android app (Capacitor)
+
+The same web code ships inside a native Android app (`android/`, Capacitor + a custom `AudioPlayer` plugin):
+
+- **Native playback** — ExoPlayer runs in a foreground `MediaSessionService` (`PlayerService`), so playback, track switching (repeat/auto-next) and the sleep timer keep working with the screen locked. Lock-screen/notification controls come from MediaSession; audio focus and headphone-unplug pause are handled natively.
+- **Native offline audio cache** — ExoPlayer streams through a read-through `CacheDataSource` backed by `SimpleCache` with a `LeastRecentlyUsedCacheEvictor` (500 MB) in `files/media_cache`. Played lessons are cached natively and replay offline; the header's cache display and **Clear cache** button talk to the native cache via the plugin (`cacheStats`/`clearCache`). The service worker still caches transcripts inside the WebView.
+- **Sleep timer** — armed natively (`Handler` + `elapsedRealtime`, self-correcting) and ExoPlayer holds a wake lock while playing, so it fires exactly on time with the screen off.
+
+### Building
+
+Requires JDK 21, the Android SDK (`ANDROID_HOME`), and podman (for Node):
+
+```bash
+tools/cap_sync.sh        # copy web assets into www/ + npx cap sync (podman node:20)
+cd android
+JAVA_HOME=$(/usr/libexec/java_home -v 21) ./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+> **After reinstalling, run `adb shell pm clear io.github.bubuguo.englishpod`** (or clear the app in Settings) before launching — reinstalls keep app data, and the WebView may serve a stale cached `app.js` from the previous install.
+
 ## Notes
 
 - Media is fetched directly from `https://archive.org/download/englishpod_all/…`, which serves `Access-Control-Allow-Origin: *` and supports byte ranges, so no server-side proxy is needed.

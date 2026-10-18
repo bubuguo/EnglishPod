@@ -10,6 +10,8 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import androidx.media3.datasource.cache.SimpleCache;
+
 /**
  * JS <-> native bridge for playback. All player state lives in
  * PlayerService (foreground); this plugin forwards calls to it and pushes
@@ -128,6 +130,39 @@ public class AudioPlugin extends Plugin implements PlayerService.EventsListener 
     public void clearSleepTimer(final PluginCall call) {
         withService(call, (svc, c) -> svc.clearSleepTimer());
         call.resolve();
+    }
+
+    /** Native audio cache usage: bytes on disk, cached file count, quota.
+     *  Backs the header's "Cache: X MB" display in native mode (the service
+     *  worker only sees transcripts there). */
+    @PluginMethod
+    public void cacheStats(final PluginCall call) {
+        main.post(() -> {
+            SimpleCache c = PlayerService.cache;
+            JSObject data = new JSObject();
+            data.put("bytes", c != null ? c.getCacheSpace() : 0L);
+            data.put("count", c != null ? c.getKeys().size() : 0);
+            data.put("quota", 500L * 1024 * 1024);
+            call.resolve(data);
+        });
+    }
+
+    /** Delete everything from the native audio cache. */
+    @PluginMethod
+    public void clearCache(final PluginCall call) {
+        main.post(() -> {
+            SimpleCache c = PlayerService.cache;
+            if (c != null) {
+                for (String key : c.getKeys()) {
+                    try {
+                        c.removeResource(key);
+                    } catch (Exception e) {
+                        /* keep clearing the rest */
+                    }
+                }
+            }
+            call.resolve();
+        });
     }
 
     // ---- native -> JS events ----

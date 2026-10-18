@@ -275,11 +275,20 @@ function setupNativeBar() {
     seekDragging = false;
   });
 
+  let lastStatsRefresh = 0;
   player.on('timeupdate', () => {
     els.curTime.textContent = fmtTime(player.position);
     els.durTime.textContent = fmtTime(player.duration);
     if (!seekDragging && player.duration > 0) {
       els.seekBar.value = Math.round((player.position / player.duration) * 1000);
+    }
+    // The native cache fills as audio streams; the init-time stats read ran
+    // before the service (and its cache) even existed, so keep the display
+    // fresh while playing.
+    const now = Date.now();
+    if (now - lastStatsRefresh > 30000) {
+      lastStatsRefresh = now;
+      refreshStats();
     }
   });
   player.on('stateChanged', () => {
@@ -375,7 +384,17 @@ function updateCacheStats(stats) {
   )} (${stats.count} files)`;
 }
 
-function refreshStats() {
+async function refreshStats() {
+  if (IS_NATIVE) {
+    // Native mode: the audio cache is SimpleCache in PlayerService (500 MB LRU).
+    try {
+      const res = await player.P.cacheStats();
+      updateCacheStats({ total: res.bytes || 0, quota: res.quota || 0, count: res.count || 0 });
+    } catch (err) {
+      els.cacheUsage.textContent = 'Cache: unavailable';
+    }
+    return;
+  }
   swMessage({ type: 'stats' })
     .then(updateCacheStats)
     .catch(() => {
@@ -384,7 +403,10 @@ function refreshStats() {
 }
 
 // The SW broadcasts stats after caching/evicting media; keep the display live.
+// In native mode the audio bytes live in PlayerService's SimpleCache (the SW
+// only caches transcripts), so SW stats would under-report — ignore them.
 navigator.serviceWorker.addEventListener('message', (e) => {
+  if (IS_NATIVE) return;
   if (e.data && e.data.type === 'stats') updateCacheStats(e.data);
 });
 // On the very first load the SW only becomes controller after registration;
@@ -659,13 +681,18 @@ els.btnClearCache.addEventListener('click', async () => {
   if (!confirm('Delete all cached audio and transcripts?')) return;
   els.btnClearCache.disabled = true;
   try {
-    const res = await swMessage({ type: 'clear' });
-    updateCacheStats(res);
+    if (IS_NATIVE) await player.P.clearCache(); // native audio cache
   } catch (err) {
     /* ignore */
-  } finally {
-    els.btnClearCache.disabled = false;
   }
+  try {
+    const res = await swMessage({ type: 'clear' }); // SW cache: transcripts (both modes)
+    if (!IS_NATIVE) updateCacheStats(res);
+  } catch (err) {
+    /* ignore */
+  }
+  if (IS_NATIVE) refreshStats();
+  els.btnClearCache.disabled = false;
 });
 
 /* Save playback position so it can be resumed later. */
