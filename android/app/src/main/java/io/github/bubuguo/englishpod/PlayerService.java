@@ -241,8 +241,8 @@ public class PlayerService extends MediaSessionService {
     /** play() that restarts from the beginning at end-of-track. ExoPlayer
      *  alone would stay STATE_ENDED on play() (unlike HTML5 audio, which
      *  restarts); users expect play-at-end to replay. Covers the JS bridge
-     *  path; the lock-screen play button is handled by the MediaSession
-     *  callback below. */
+     *  path; the lock-screen play button is covered by the ForwardingPlayer
+     *  wrapping the session player (see onCreate). */
     public void play() {
         if (player.getPlaybackState() == Player.STATE_ENDED) player.seekTo(0);
         player.play();

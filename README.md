@@ -62,6 +62,48 @@ JAVA_HOME=$(/usr/libexec/java_home -v 21) ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+### Release build
+
+The release build is signed with a private keystore referenced by
+`android/keystore.properties` (gitignored). One-time setup:
+
+```bash
+# 1. Generate a keystore (keep it OUTSIDE the repo and back it up — losing it
+#    means you can never update the app for existing installs):
+mkdir -p ~/keystores
+keytool -genkeypair -v \
+  -keystore ~/keystores/englishpod-release.jks \
+  -alias englishpod -keyalg RSA -keysize 2048 -validity 10000
+
+# 2. Describe it in android/keystore.properties (never committed):
+#    storeFile=/Users/<you>/keystores/englishpod-release.jks
+#    storePassword=...
+#    keyAlias=englishpod
+#    keyPassword=...
+```
+
+Every release:
+
+```bash
+# 1. Bump versionCode (+1, always) and versionName in android/app/build.gradle.
+# 2. Sync web assets, then build:
+tools/cap_sync.sh
+cd android
+JAVA_HOME=$(/usr/libexec/java_home -v 21) ./gradlew assembleRelease   # APK (sideload)
+# or: ./gradlew bundleRelease                                         # AAB (Play Store)
+
+# 3. Verify the signature and install:
+$ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs \
+  app/build/outputs/apk/release/app-release.apk
+adb install -r app/build/outputs/apk/release/app-release.apk
+```
+
+Outputs: `app/build/outputs/apk/release/app-release.apk` (sideload) or
+`app/build/outputs/bundle/release/app-release.aab` (Play Store upload — Play
+re-signs with its own key via Play App Signing). The debug and release builds
+have different signatures: uninstall the debug build before installing the
+release one.
+
 > **After reinstalling, run `adb shell pm clear io.github.bubuguo.englishpod`** (or clear the app in Settings) before launching — reinstalls keep app data, and the WebView may serve a stale cached `app.js` from the previous install.
 
 ## Notes

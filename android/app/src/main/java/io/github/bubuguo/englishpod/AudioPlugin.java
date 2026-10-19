@@ -15,8 +15,8 @@ import androidx.media3.datasource.cache.SimpleCache;
 /**
  * JS <-> native bridge for playback. All player state lives in
  * PlayerService (foreground); this plugin forwards calls to it and pushes
- * native events back to JS: progress (1 Hz), stateChanged, ended, error,
- * sleepFired.
+ * native events back to JS: progress (1 Hz while the UI is visible),
+ * stateChanged, ended, error, sleepFired.
  *
  * Threading: plugin methods run on Capacitor worker threads, but ExoPlayer
  * must only be touched from the thread that created it (main) — every call
