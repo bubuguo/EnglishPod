@@ -3,9 +3,9 @@
 
 Usage: python3 server.py [port]
 
-Serves the static app from ./public on http://localhost:8080 (or the given
-port). Media is streamed directly from archive.org by the browser, so no
-proxy is required.
+Serves the static app from the repository root on http://localhost:8080 (or
+the given port). Media is streamed directly from archive.org by the browser,
+so no proxy is required.
 """
 import http.server
 import os

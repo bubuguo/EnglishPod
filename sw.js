@@ -6,20 +6,21 @@
  *   size and last-accessed timestamp. When the total media cache exceeds
  *   QUOTA bytes, the least-recently-accessed entries are evicted first.
  */
-const VERSION = 'v2';
+const VERSION = 'v4';
 const SHELL_CACHE = `epod-shell-${VERSION}`;
 const MEDIA_CACHE = `epod-media-${VERSION}`;
 const DB_NAME = 'epod-cache-db';
 const DB_STORE = 'entries';
 const QUOTA = 500 * 1024 * 1024; // 500 MB
-const MEDIA_PREFIX = 'https://archive.org/download/englishpod_all/';
+// Any Archive.org download file (items and their subfolders) is cacheable.
+const MEDIA_PREFIX = 'https://archive.org/download/';
 
 const SHELL_ASSETS = [
   './',
   './index.html',
   './styles.css',
+  './catalog.js',
   './app.js',
-  './lessons.json',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -100,7 +101,7 @@ async function enforceQuota() {
   let total = entries.reduce((sum, e) => sum + (e.size || 0), 0);
   if (total <= QUOTA) return { total, count: entries.length };
   // Least-recently-accessed first; never evict the file currently playing.
-  entries.sort((a, b) => a.ts - b.ts);
+  entries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
   const cache = await caches.open(MEDIA_CACHE);
   for (const entry of entries) {
     if (total <= QUOTA) break;
@@ -144,17 +145,22 @@ function parseRange(header, size) {
   return { start, end };
 }
 
-let playingBuffer = null; // { url, buf } — avoid re-reading the whole file per range request
+// The file that is currently being streamed is kept as one Blob: the browser
+// asks for the same file in many small ranges, and re-reading it from the
+// cache for every range would be far more expensive. A Blob (not an
+// ArrayBuffer) keeps the file out of the JS heap — the browser slices it
+// lazily — so a 100 MB file does not have to be materialised in memory.
+let playingBuffer = null; // { url, blob }
 
 async function sliceResponse(response, rangeHeader, url) {
-  let buf;
+  let blob;
   if (playingBuffer && playingBuffer.url === url) {
-    buf = playingBuffer.buf;
+    blob = playingBuffer.blob;
   } else {
-    buf = await response.arrayBuffer();
-    playingBuffer = { url, buf };
+    blob = await response.blob();
+    playingBuffer = { url, blob };
   }
-  const size = buf.byteLength;
+  const size = blob.size;
   const range = parseRange(rangeHeader, size);
   const headers = {
     'Content-Type': response.headers.get('content-type') || 'application/octet-stream',
@@ -162,11 +168,11 @@ async function sliceResponse(response, rangeHeader, url) {
   };
   if (!range) {
     headers['Content-Length'] = String(size);
-    return new Response(buf, { status: 200, headers });
+    return new Response(blob, { status: 200, headers });
   }
   headers['Content-Range'] = `bytes ${range.start}-${range.end}/${size}`;
   headers['Content-Length'] = String(range.end - range.start + 1);
-  return new Response(buf.slice(range.start, range.end + 1), {
+  return new Response(blob.slice(range.start, range.end + 1), {
     status: 206,
     statusText: 'Partial Content',
     headers,

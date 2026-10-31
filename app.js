@@ -1,9 +1,12 @@
-/* EnglishPod PWA app logic. */
+/* Archive.org audio player PWA app logic. */
 'use strict';
 
-const CATALOG_URL = './lessons.json';
 const LS_KEY = 'epod-settings';
-const ARCHIVE_BASE = 'https://archive.org/download/englishpod_all/'; // keep in sync with MEDIA_PREFIX in sw.js
+const LS_CATALOG = 'epod-catalog:';
+const LS_LAST = 'epod-last:';
+const LS_POSITION = 'epod-position:';
+const DEFAULT_CONFIG_ID = Catalog.DEFAULT_CONFIG_ID;
+const MAX_SAVED_CONFIGS = Catalog.MAX_SAVED_CONFIGS;
 
 const $ = (id) => document.getElementById(id);
 
@@ -31,10 +34,24 @@ const els = {
   transcriptNote: $('transcriptNote'),
   cacheUsage: $('cacheUsage'),
   btnClearCache: $('btnClearCache'),
+  brandTitle: $('brandTitle'),
+  btnSettings: $('btnSettings'),
+  settingsDialog: $('settingsDialog'),
+  cfgFolderUrl: $('cfgFolderUrl'),
+  cfgAudioRows: $('cfgAudioRows'),
+  cfgTranscript: $('cfgTranscript'),
+  cfgStatus: $('cfgStatus'),
+  cfgName: $('cfgName'),
+  cfgSavedList: $('cfgSavedList'),
+  btnAddAudioRow: $('btnAddAudioRow'),
+  btnSaveAsNew: $('btnSaveAsNew'),
+  btnTestSettings: $('btnTestSettings'),
+  btnSaveSettings: $('btnSaveSettings'),
+  btnCancelSettings: $('btnCancelSettings'),
+  btnResetSettings: $('btnResetSettings'),
 };
 
-const TRACK_LABELS = { pb: 'Podcast (full lesson)', dg: 'Dialog', rv: 'Review' };
-
+/* Track labels come from the resource configuration (see catalog.js). */
 /* ---------------- Player adapter ----------------
  * All playback goes through this interface; app logic never touches the
  * <audio> element directly. The Capacitor build will slot in a
@@ -45,14 +62,20 @@ class HtmlPlayer {
   constructor(el) {
     this.el = el;
     this.sleepInterval = null;
-    this.listeners = { ended: [], timeupdate: [], error: [] };
+    this.listeners = { ended: [], timeupdate: [], error: [], stateChanged: [] };
     el.addEventListener('ended', () => this.emit('ended'));
     el.addEventListener('timeupdate', () => this.emit('timeupdate'));
     el.addEventListener('error', () => this.emit('error'));
     // Keep the lock-screen/notification play-pause icon in sync no matter
     // what triggered the state change (UI, media session, end of track).
-    el.addEventListener('play', () => this._setPlaybackState('playing'));
-    el.addEventListener('pause', () => this._setPlaybackState('paused'));
+    el.addEventListener('play', () => {
+      this._setPlaybackState('playing');
+      this.emit('stateChanged', { playing: true });
+    });
+    el.addEventListener('pause', () => {
+      this._setPlaybackState('paused');
+      this.emit('stateChanged', { playing: false });
+    });
   }
 
   _setPlaybackState(state) {
@@ -137,6 +160,12 @@ class HtmlPlayer {
       this.sleepInterval = null;
     }
   }
+
+  /* In the browser this interval IS the sleep timer — it has to keep running
+   * while the page is hidden, otherwise the audio would never stop. */
+  pauseSleepTick() {}
+
+  resumeSleepTick() {}
 }
 
 /* True inside the Capacitor Android app (not in a plain browser). */
@@ -163,14 +192,13 @@ class NativePlayer {
     this.sleepTick = null;
     this._pendingLoad = null; // loadTrack that failed while backgrounded
     const P = window.Capacitor.Plugins.AudioPlayer;
-    // If a load was rejected because the service couldn't start (app briefly
-    // backgrounded at launch), retry it as soon as the app is active again.
-    const App = window.Capacitor.Plugins.App;
-    if (App && App.addListener) {
-      App.addListener('appStateChange', (state) => {
-        if (state.isActive) this._retryPendingLoad();
-      });
-    }
+    // If a load was rejected because the service couldn't start (the app was
+    // briefly backgrounded at launch), retry it as soon as the app is active
+    // again. The plugin reports the activity state itself — the Capacitor
+    // App plugin is not a dependency of this app.
+    P.addListener('appState', (d) => {
+      if (d && d.state === 'active') this._retryPendingLoad();
+    });
     P.addListener('progress', (d) => {
       this.position = d.position || 0;
       this.duration = d.duration || 0;
@@ -246,24 +274,47 @@ class NativePlayer {
   setSleepTimer(minutes, { onFire, onTick }) {
     this.clearSleepTimer();
     this._onFire = onFire;
-    const deadline = Date.now() + minutes * 60000;
-    this.sleepTick = setInterval(() => {
-      const left = deadline - Date.now();
-      if (left <= 0) {
-        // Native onSleepFired will arrive too; this is the display catch-up.
-        onTick('0:00');
-        return;
-      }
-      onTick(`${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}`);
-    }, 1000);
+    this._onTick = onTick;
+    this._deadline = Date.now() + minutes * 60000;
+    this._startSleepTick();
     this.P.setSleepTimer({ minutes });
   }
 
-  clearSleepTimer() {
+  _startSleepTick() {
+    if (this.sleepTick) return;
+    const tick = () => {
+      const left = this._deadline - Date.now();
+      if (left <= 0) {
+        // Native onSleepFired will arrive too; this is the display catch-up.
+        this._onTick('0:00');
+        return;
+      }
+      this._onTick(
+        `${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}`
+      );
+    };
+    tick();
+    this.sleepTick = setInterval(tick, 1000);
+  }
+
+  /* The countdown is display-only: stop the 1 Hz timer while the app is in
+   * the background — the native service still stops the playback on time,
+   * and a timer that ticks every second in a background WebView costs
+   * battery for nothing. */
+  pauseSleepTick() {
     if (this.sleepTick) {
       clearInterval(this.sleepTick);
       this.sleepTick = null;
     }
+  }
+
+  resumeSleepTick() {
+    if (this._deadline && Date.now() < this._deadline) this._startSleepTick();
+  }
+
+  clearSleepTimer() {
+    this.pauseSleepTick();
+    this._deadline = 0;
     this.P.clearSleepTimer();
   }
 }
@@ -311,9 +362,10 @@ function setupNativeBar() {
     }
     // The native cache fills as audio streams; the init-time stats read ran
     // before the service (and its cache) even existed, so keep the display
-    // fresh while playing.
+    // fresh while playing. The native stats call walks the cache's key set,
+    // so it runs once a minute, not on every tick.
     const now = Date.now();
-    if (now - lastStatsRefresh > 30000) {
+    if (now - lastStatsRefresh > 60000) {
       lastStatsRefresh = now;
       refreshStats();
     }
@@ -334,28 +386,10 @@ let sleepMode = 'off'; // 'off' | 'track' | minutes
 
 /* ---------------- Catalog helpers ---------------- */
 
-// Derive any track URL from the pb file name in the catalog:
-// englishpod_0001pb.ogg + kind -> englishpod_0001<kind>.ogg
-function trackUrl(lesson, kind) {
-  const m = /^englishpod_(\d+)(pb|dg|rv)\.ogg$/.exec(lesson.file || '');
-  return m && TRACK_LABELS[kind] ? ARCHIVE_BASE + `englishpod_${m[1]}${kind}.ogg` : null;
-}
-
-// Derive the transcript URL from the audio file name:
-// englishpod_0001pb.ogg -> englishpod_0001dg.txt
-function transcriptUrl(lesson) {
-  const m = /^englishpod_(\d+)(pb|dg|rv)\.ogg$/.exec(lesson.file || '');
-  return m ? ARCHIVE_BASE + `englishpod_${m[1]}dg.txt` : null;
-}
-
-// "1" -> "0001"
-function lessonNum(lesson) {
-  return String(lesson.id).padStart(4, '0');
-}
-
-// "Elementary" -> "E", "Upper-Intermediate" -> "U"
-function levelInitial(lesson) {
-  return (lesson.type || '?').trim().charAt(0).toUpperCase();
+// The tracks of a lesson are the audio files matched by the configuration.
+function trackOf(lesson, kind) {
+  const tracks = (lesson && lesson.tracks) || [];
+  return tracks.find((t) => t.kind === kind) || tracks[0] || null;
 }
 
 /* ---------------- Settings persistence ---------------- */
@@ -373,13 +407,53 @@ function loadSettings() {
 }
 
 function saveSettings() {
-  localStorage.setItem(
-    LS_KEY,
-    JSON.stringify({
-      repeat: els.repeatSelect.value,
-      autoNext: els.autoNext.checked,
-    })
-  );
+  try {
+    localStorage.setItem(
+      LS_KEY,
+      JSON.stringify({
+        repeat: els.repeatSelect.value,
+        autoNext: els.autoNext.checked,
+      })
+    );
+  } catch (err) {
+    /* storage full — non-fatal */
+  }
+}
+
+/* ---------------- Resource configuration ---------------- */
+
+function cloneConfig(cfg) {
+  return JSON.parse(JSON.stringify(cfg));
+}
+
+function normalizeConfig(cfg) {
+  return Catalog.normalizeConfig(cfg);
+}
+
+/* ---------------- Saved catalog history ---------------- */
+
+let savedConfigs = []; // history of saved catalogs
+let activeConfigId = ''; // id of the active entry
+
+// Read the saved catalog history (the built-in catalog is always present).
+function loadSavedConfigs() {
+  const res = Catalog.readSavedConfigs(localStorage, { max: MAX_SAVED_CONFIGS });
+  savedConfigs = res.list;
+  activeConfigId = res.activeId;
+  saveSavedConfigs();
+}
+
+// Persist the history. The list is trimmed to MAX_SAVED_CONFIGS entries
+// (the built-in and the active catalog are never dropped).
+function saveSavedConfigs() {
+  savedConfigs = Catalog.trimSavedConfigs(savedConfigs, activeConfigId, MAX_SAVED_CONFIGS);
+  const ok = Catalog.writeSavedConfigs(localStorage, savedConfigs, activeConfigId);
+  if (!ok) setCfgStatus('Could not save the catalog history (storage is full).', 'error');
+  return ok;
+}
+
+function activeEntry() {
+  return Catalog.findSavedConfig(savedConfigs, activeConfigId) || savedConfigs[0] || null;
 }
 
 /* ---------------- Service worker messaging ---------------- */
@@ -429,34 +503,41 @@ async function refreshStats() {
     });
 }
 
-// The SW broadcasts stats after caching/evicting media; keep the display live.
-// In native mode the audio bytes live in PlayerService's SimpleCache (the SW
-// only caches transcripts), so SW stats would under-report — ignore them.
-navigator.serviceWorker.addEventListener('message', (e) => {
-  if (IS_NATIVE) return;
-  if (e.data && e.data.type === 'stats') updateCacheStats(e.data);
-});
-// On the very first load the SW only becomes controller after registration;
-// refresh stats once it takes over so the header doesn't say "unavailable".
-navigator.serviceWorker.addEventListener('controllerchange', () => refreshStats());
+// The service worker only exists in a secure context (https:// or localhost).
+// On plain http://<lan-ip> the app still works — just without offline caching.
+if ('serviceWorker' in navigator) {
+  // The SW broadcasts stats after caching/evicting media; keep the display live.
+  // In native mode the audio bytes live in PlayerService's SimpleCache (the SW
+  // only caches transcripts), so SW stats would under-report — ignore them.
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (IS_NATIVE) return;
+    if (e.data && e.data.type === 'stats') updateCacheStats(e.data);
+  });
+  // On the very first load the SW only becomes controller after registration;
+  // refresh stats once it takes over so the header doesn't say "unavailable".
+  navigator.serviceWorker.addEventListener('controllerchange', () => refreshStats());
+}
 
 /* ---------------- Lesson list ---------------- */
 
 function renderLessonList(filter) {
+  if (!catalog) return;
   const q = (filter || '').trim().toLowerCase();
   els.lessonList.innerHTML = '';
+  let index = 0;
   for (const lesson of catalog) {
-    if (q && !`${lesson.id} ${lesson.title} ${lesson.type}`.toLowerCase().includes(q)) continue;
+    index++;
+    if (q && !`${lesson.id} ${lesson.title}`.toLowerCase().includes(q)) continue;
     const li = document.createElement('li');
     li.dataset.id = lesson.id;
     li.tabIndex = 0;
     li.setAttribute('role', 'button');
     const num = document.createElement('span');
     num.className = 'num';
-    num.textContent = lessonNum(lesson);
+    num.textContent = String(index).padStart(4, '0');
     li.appendChild(num);
-    li.appendChild(document.createTextNode(`(${levelInitial(lesson)})${lesson.title}`));
-    li.title = `${lesson.type} — ${lesson.title}`;
+    li.appendChild(document.createTextNode(lesson.title));
+    li.title = lesson.title;
     li.addEventListener('click', () => selectLesson(lesson));
     li.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
@@ -481,38 +562,47 @@ function markActiveLesson(id) {
 function selectTrack(kind, opts = {}) {
   const lesson = currentLesson;
   if (!lesson) return;
-  const url = trackUrl(lesson, kind) || (lesson.file ? ARCHIVE_BASE + lesson.file : null);
-  if (!url) return;
+  const track = trackOf(lesson, kind);
+  if (!track) return;
+  const url = track.url;
   currentTrackUrl = url;
   repeatCount = 0;
   updateRepeatState();
   els.audioError.classList.add('hidden');
   player.load(url, {
     ...opts,
-    title: `${lessonNum(lesson)}. ${lesson.title}`,
-    artist: lesson.type || 'EnglishPod',
+    title: lesson.title,
+    artist: collectionTitle,
   });
   swMessage({ type: 'nowPlaying', url }).catch(() => {});
-  localStorage.setItem('epod-last', JSON.stringify({ id: lesson.id, track: kind }));
+  localStorage.setItem(LS_LAST + resourceKey, JSON.stringify({ id: lesson.id, track: track.kind }));
   updateMediaSession(lesson);
 }
 
+// The track options come straight from the "Audio file name patterns" of the
+// active resource: one option per configured pattern, in the configured order.
+// They are built once per catalog, not once per lesson.
+function buildTrackOptions() {
+  els.trackSelect.innerHTML = '';
+  for (const t of Catalog.configTracks(resourceConfig)) {
+    const opt = document.createElement('option');
+    opt.value = t.kind;
+    opt.textContent = t.label;
+    els.trackSelect.appendChild(opt);
+  }
+}
+
 function selectLesson(lesson, trackKind, opts = {}) {
+  // The track the user picked has to be read before the select is updated.
+  const wanted = trackKind || els.trackSelect.value;
   currentLesson = lesson;
   markActiveLesson(lesson.id);
   els.placeholder.classList.add('hidden');
   els.player.classList.remove('hidden');
-  els.lessonTitle.textContent = `${lessonNum(lesson)}. ${lesson.title}`;
-  els.lessonMeta.textContent = `${lesson.type} · Lesson ${lesson.id}`;
+  els.lessonTitle.textContent = lesson.title;
+  els.lessonMeta.textContent = `${collectionTitle} · ${String(lesson.id).trim()}`;
 
-  els.trackSelect.innerHTML = '';
-  for (const kind of Object.keys(TRACK_LABELS)) {
-    const opt = document.createElement('option');
-    opt.value = kind;
-    opt.textContent = TRACK_LABELS[kind];
-    els.trackSelect.appendChild(opt);
-  }
-  els.trackSelect.value = trackKind && TRACK_LABELS[trackKind] ? trackKind : 'pb';
+  els.trackSelect.value = wanted;
 
   loadTranscript(lesson);
   selectTrack(els.trackSelect.value, opts);
@@ -524,7 +614,7 @@ async function loadTranscript(lesson) {
   const seq = ++transcriptSeq;
   els.transcript.textContent = 'Loading transcript…';
   els.transcriptNote.textContent = '';
-  const url = transcriptUrl(lesson);
+  const url = lesson.transcript && lesson.transcript.url;
   if (!url) {
     els.transcript.textContent = 'No transcript available for this lesson.';
     return;
@@ -576,6 +666,9 @@ els.repeatSelect.addEventListener('change', () => {
 /* ---------------- Player events ---------------- */
 
 player.on('ended', () => {
+  // A finished media element stays "unpaused", so the pause event never
+  // arrives — stop the position timer explicitly.
+  stopPositionTimer();
   if (sleepMode === 'track') {
     stopSleepTimer('Stopped at end of track');
     return;
@@ -601,9 +694,14 @@ player.on('error', (d) => {
 
 /* Confirm "really listened" after 30 s of continuous playback: only then is
  * the cache entry's access timestamp refreshed, so briefly-opened lessons
- * stay evictable under the LRU quota. Fired at most once per track load. */
+ * stay evictable under the LRU quota. Fired at most once per track load.
+ * `timeupdate` fires ~4x/s, so the check is throttled. */
+let lastTouchCheck = 0;
 player.on('timeupdate', () => {
   if (!currentTrackUrl || confirmedTouchUrl === currentTrackUrl) return;
+  const now = Date.now();
+  if (now - lastTouchCheck < 5000) return;
+  lastTouchCheck = now;
   if (player.position > 30) {
     confirmedTouchUrl = currentTrackUrl;
     swMessage({ type: 'touch', url: currentTrackUrl }).catch(() => {});
@@ -638,9 +736,9 @@ function updateMediaSession(lesson) {
   if (IS_NATIVE) return; // native lock-screen metadata comes from PlayerService
   if (!('mediaSession' in navigator)) return;
   navigator.mediaSession.metadata = new MediaMetadata({
-    title: `${lessonNum(lesson)}. ${lesson.title}`,
-    artist: lesson.type,
-    album: 'EnglishPod',
+    title: lesson.title,
+    artist: collectionTitle,
+    album: collectionTitle,
     artwork: [{ src: './icons/icon-512.png', sizes: '512x512', type: 'image/png' }],
   });
 }
@@ -680,6 +778,7 @@ function startSleepTimer(minutes) {
   player.setSleepTimer(minutes, {
     onFire: () => stopSleepTimer('Sleep timer: stopped'),
     onTick: (left) => {
+      if (uiHidden()) return; // nobody is looking at the countdown
       els.sleepState.textContent = `stops in ${left}`;
     },
   });
@@ -706,7 +805,13 @@ els.sleepSelect.addEventListener('change', () => {
 
 els.trackSelect.addEventListener('change', () => selectTrack(els.trackSelect.value));
 els.autoNext.addEventListener('change', saveSettings);
-els.search.addEventListener('input', () => renderLessonList(els.search.value));
+// Debounce the search: re-rendering hundreds of list items on every keystroke
+// is slow on a phone.
+let searchTimer = null;
+els.search.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => renderLessonList(els.search.value), 150);
+});
 
 els.btnClearCache.addEventListener('click', async () => {
   if (!confirm('Delete all cached audio and transcripts?')) return;
@@ -726,46 +831,590 @@ els.btnClearCache.addEventListener('click', async () => {
   els.btnClearCache.disabled = false;
 });
 
-/* Save playback position so it can be resumed later. */
-setInterval(() => {
-  if (currentLesson && !player.paused && player.position > 0) {
+/* Save playback position so it can be resumed later.
+ *
+ * The interval only runs while something is playing: a timer that ticks
+ * forever in the background wakes the CPU for nothing — and in the native
+ * app the WebView keeps running even when the app is in the background. */
+function savePlaybackPosition() {
+  if (!currentLesson || player.paused || player.position <= 0) return;
+  try {
     localStorage.setItem(
-      'epod-position',
+      LS_POSITION + resourceKey,
       JSON.stringify({ id: currentLesson.id, track: els.trackSelect.value, t: player.position })
     );
-  }
-}, 60000);
-
-/* ---------------- Init ---------------- */
-
-async function loadCatalog() {
-  try {
-    const resp = await fetch(CATALOG_URL);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    catalog = await resp.json();
-    try {
-      localStorage.setItem('epod-catalog', JSON.stringify(catalog));
-    } catch (err) {
-      /* storage full — non-fatal */
-    }
   } catch (err) {
-    // Offline first visit or fetch failure: fall back to the mirrored copy.
-    const cached = localStorage.getItem('epod-catalog');
-    if (cached) {
-      try {
-        catalog = JSON.parse(cached);
-        console.warn('Using cached catalog:', err);
-      } catch (parseErr) {
-        throw err; // corrupt mirror — report the original failure
-      }
-    } else {
-      throw err;
-    }
+    /* storage full — non-fatal */
   }
 }
 
+let positionTimer = null;
+function startPositionTimer() {
+  if (positionTimer) return;
+  positionTimer = setInterval(savePlaybackPosition, 60000);
+}
+function stopPositionTimer() {
+  if (!positionTimer) return;
+  clearInterval(positionTimer);
+  positionTimer = null;
+}
+
+player.on('stateChanged', (d) => {
+  const playing = d && typeof d.playing === 'boolean' ? d.playing : !player.paused;
+  if (playing) startPositionTimer();
+  else stopPositionTimer();
+});
+
+/* ---------------- Background / visibility ---------------- */
+
+/* True when the UI is not visible: the browser tab is in the background or
+ * (in the native app) the activity is paused. Work that only feeds the
+ * display is skipped then — the audio keeps playing either way. */
+let appInBackground = false;
+function uiHidden() {
+  return document.hidden || appInBackground;
+}
+
+function updateBackgroundState() {
+  if (uiHidden()) {
+    player.pauseSleepTick(); // the countdown is display-only
+  } else {
+    player.resumeSleepTick();
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) savePlaybackPosition();
+  updateBackgroundState();
+});
+window.addEventListener('pagehide', savePlaybackPosition);
+
+// The native app keeps its WebView alive in the background, so the plugin
+// reports when the activity is paused or resumed.
+if (IS_NATIVE && player.P && typeof player.P.addListener === 'function') {
+  player.P.addListener('appState', (d) => {
+    appInBackground = !!(d && d.state === 'paused');
+    if (appInBackground) savePlaybackPosition();
+    updateBackgroundState();
+  });
+}
+
+/* ---------------- Resource configuration & catalog ---------------- */
+
+let resourceConfig = null; // active resource configuration
+let resourceKey = '';      // "<item>/<subfolder>" — namespaces localStorage
+let collectionTitle = 'Archive.org';
+
+function catalogCacheKey(key) {
+  return LS_CATALOG + key;
+}
+
+function readCachedCatalog(key) {
+  try {
+    const raw = localStorage.getItem(catalogCacheKey(key));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function writeCachedCatalog(key, built) {
+  try {
+    localStorage.setItem(
+      catalogCacheKey(key),
+      JSON.stringify({
+        collectionTitle: built.collectionTitle,
+        lessons: built.lessons,
+        savedAt: Date.now(),
+      })
+    );
+  } catch (err) {
+    /* storage full — non-fatal */
+  }
+}
+
+async function fetchMetadata(url) {
+  const resp = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+// Load the catalog for a configuration from the Archive.org metadata API.
+// The built-in EnglishPod catalog is described by Catalog.DEFAULT_CONFIG and
+// is built exactly like any other catalog.
+async function applyConfig(cfg) {
+  const parsed = Catalog.parseArchiveUrl(cfg.folderUrl);
+  const key = Catalog.resourceKey(cfg);
+
+  const meta = await fetchMetadata(parsed.metadataUrl);
+  const built = Catalog.buildCatalog(meta, cfg);
+  resourceConfig = cfg;
+  resourceKey = key;
+  catalog = built.lessons;
+  collectionTitle = built.collectionTitle;
+  buildTrackOptions();
+  writeCachedCatalog(key, built);
+  applyCollectionTitle();
+}
+
+function applyCollectionTitle() {
+  // The header shows the name the user gave the catalog; the Archive.org
+  // collection title stays the MediaSession album.
+  const entry = activeEntry();
+  const title = (entry && entry.name) || collectionTitle;
+  if (els.brandTitle) els.brandTitle.textContent = title;
+  document.title = title + ' Player';
+}
+
+/* ---------------- Switching between saved catalogs ---------------- */
+
+// Show the cached catalog of a resource right away (offline-first).
+function showCachedCatalog(cfg) {
+  let key = '';
+  try {
+    key = Catalog.resourceKey(cfg);
+  } catch (err) {
+    return false;
+  }
+  const cached = readCachedCatalog(key);
+  if (!cached || !cached.lessons || !cached.lessons.length) return false;
+  catalog = cached.lessons;
+  collectionTitle = cached.collectionTitle || collectionTitle;
+  resourceConfig = cfg;
+  resourceKey = key;
+  buildTrackOptions();
+  applyCollectionTitle();
+  renderLessonList('');
+  return true;
+}
+
+// Restore the last played lesson (and position) of the active resource.
+function restoreLastLesson() {
+  if (!catalog || !catalog.length) return;
+  let last = null;
+  try {
+    last = JSON.parse(localStorage.getItem(LS_LAST + resourceKey) || 'null');
+  } catch (err) {
+    /* ignore */
+  }
+  const lesson = (last && catalog.find((l) => l.id === last.id)) || catalog[0];
+
+  let resume = 0;
+  try {
+    const pos = JSON.parse(localStorage.getItem(LS_POSITION + resourceKey) || 'null');
+    if (pos && pos.id === lesson.id && (!last || !last.track || pos.track === last.track)) {
+      resume = pos.t || 0;
+    }
+  } catch (err) {
+    /* ignore */
+  }
+  selectLesson(lesson, last && last.track, resume > 5 ? { resumePosition: resume } : {});
+}
+
+let switching = false; // only one catalog switch at a time
+
+// Switch the app to a saved catalog: cached copy first, then a fresh build.
+// Returns false when another switch is already running.
+async function switchToEntry(entry) {
+  if (!entry) throw new Error('Unknown catalog.');
+  if (switching) return false;
+  switching = true;
+  const previousId = activeConfigId;
+  try {
+    activeConfigId = entry.id;
+    savedConfigs = savedConfigs.map((e) =>
+      e.id === entry.id ? { ...e, lastUsedAt: Date.now() } : e
+    );
+    saveSavedConfigs();
+
+    const cfg = cloneConfig(entry.config);
+    const shown = showCachedCatalog(cfg);
+    try {
+      await applyConfig(cfg);
+    } catch (err) {
+      if (!shown || !catalog || !catalog.length) {
+        // The new catalog could not be loaded at all — fall back to the
+        // previous one so the header, the lesson list and the active entry
+        // stay consistent with each other.
+        activeConfigId = previousId;
+        const prev = Catalog.findSavedConfig(savedConfigs, previousId);
+        if (prev) {
+          showCachedCatalog(cloneConfig(prev.config));
+          renderLessonList('');
+        }
+        applyCollectionTitle();
+        saveSavedConfigs();
+        throw err;
+      }
+      console.warn('Catalog refresh failed, using the cached copy:', err);
+    }
+    renderLessonList('');
+    refreshStats();
+
+    if (!catalog || !catalog.length) {
+      els.placeholder.classList.remove('hidden');
+      els.player.classList.add('hidden');
+      els.placeholder.querySelector('p').textContent =
+        'No lessons found. Check the file name patterns of this catalog.';
+      return true;
+    }
+    restoreLastLesson();
+    return true;
+  } finally {
+    switching = false;
+  }
+}
+
+/* ---------------- Settings dialog ---------------- */
+
+function setCfgStatus(message, kind) {
+  els.cfgStatus.textContent = message;
+  els.cfgStatus.className = 'cfg-status' + (kind ? ' ' + kind : '');
+}
+
+function addAudioRow(spec) {
+  const row = document.createElement('div');
+  row.className = 'cfg-row';
+  // Keep the original track kind so saving the form does not renumber the
+  // tracks (the remembered track/position is stored per kind).
+  row.dataset.kind = (spec && spec.kind) || '';
+
+  const label = document.createElement('input');
+  label.type = 'text';
+  label.className = 'cfg-label';
+  label.value = (spec && spec.label) || '';
+  label.placeholder = 'Track label';
+
+  const pattern = document.createElement('input');
+  pattern.type = 'text';
+  pattern.className = 'cfg-pattern';
+  pattern.value = (spec && spec.pattern) || '';
+  pattern.placeholder = 'name_(.*)\\.ogg';
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'ghost cfg-remove';
+  remove.textContent = '✕';
+  remove.title = 'Remove this track';
+  remove.addEventListener('click', () => row.remove());
+
+  row.appendChild(label);
+  row.appendChild(pattern);
+  row.appendChild(remove);
+  els.cfgAudioRows.appendChild(row);
+}
+
+function renderAudioRows(patterns) {
+  els.cfgAudioRows.innerHTML = '';
+  const list = patterns && patterns.length ? patterns : [{ label: 'Track 1', pattern: '' }];
+  for (const spec of list) addAudioRow(spec);
+}
+
+function readAudioRows() {
+  const rows = [...els.cfgAudioRows.querySelectorAll('.cfg-row')];
+  const used = new Set();
+  return rows
+    .map((row, i) => {
+      let kind = row.dataset.kind || '';
+      if (!kind || used.has(kind)) {
+        // A new row (or a duplicate) gets a fresh, unique kind.
+        let n = used.size + 1;
+        while (used.has('t' + n)) n++;
+        kind = 't' + n;
+      }
+      used.add(kind);
+      return {
+        kind,
+        label: row.querySelector('.cfg-label').value.trim() || 'Track ' + (i + 1),
+        pattern: row.querySelector('.cfg-pattern').value.trim(),
+      };
+    })
+    .filter((p) => p.pattern);
+}
+
+function readConfigFromForm() {
+  return normalizeConfig({
+    folderUrl: els.cfgFolderUrl.value.trim(),
+    audioPatterns: readAudioRows(),
+    transcriptPattern: els.cfgTranscript.value.trim(),
+  });
+}
+
+function validateConfig(cfg) {
+  Catalog.parseArchiveUrl(cfg.folderUrl);
+  if (!cfg.audioPatterns.length) throw new Error('Add at least one audio file name pattern.');
+  for (const p of cfg.audioPatterns) Catalog.compilePattern(p.pattern, p.label);
+  if (cfg.transcriptPattern) Catalog.compilePattern(cfg.transcriptPattern, 'transcript');
+}
+
+// Short description of a configuration (item / subfolder + track count).
+function describeConfig(cfg) {
+  try {
+    const parsed = Catalog.parseArchiveUrl(cfg.folderUrl);
+    const tracks = (cfg.audioPatterns || []).length;
+    const where = parsed.subPath || parsed.itemId;
+    return where + ' · ' + tracks + (tracks === 1 ? ' track' : ' tracks');
+  } catch (err) {
+    return (cfg && cfg.folderUrl) || '';
+  }
+}
+
+// Fill the form with a saved catalog.
+function fillForm(entry) {
+  const cfg = entry ? entry.config : Catalog.DEFAULT_CONFIG;
+  renderAudioRows(cfg.audioPatterns);
+  els.cfgFolderUrl.value = cfg.folderUrl;
+  els.cfgTranscript.value = cfg.transcriptPattern || '';
+  els.cfgName.value = entry ? entry.name : Catalog.configLabel(cfg);
+}
+
+// Render the list of saved catalogs.
+function renderSavedList() {
+  els.cfgSavedList.innerHTML = '';
+  if (!savedConfigs.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted small';
+    empty.textContent = 'No saved catalogs yet.';
+    els.cfgSavedList.appendChild(empty);
+    return;
+  }
+
+  for (const entry of savedConfigs) {
+    const row = document.createElement('div');
+    row.className = 'cfg-saved-row' + (entry.id === activeConfigId ? ' active' : '');
+
+    const info = document.createElement('div');
+    info.className = 'cfg-saved-info';
+
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'cfg-saved-name';
+    name.value = entry.name;
+    name.title = 'Catalog name';
+    name.setAttribute('aria-label', 'Catalog name');
+    name.addEventListener('change', () => {
+      entry.name = name.value.trim() || Catalog.configLabel(entry.config);
+      name.value = entry.name;
+      saveSavedConfigs();
+      if (entry.id === activeConfigId) applyCollectionTitle(); // the header shows the name
+    });
+
+    const url = document.createElement('span');
+    url.className = 'cfg-saved-url';
+    url.textContent = describeConfig(entry.config);
+
+    info.appendChild(name);
+    info.appendChild(url);
+
+    const actions = document.createElement('div');
+    actions.className = 'cfg-saved-actions';
+
+    const load = document.createElement('button');
+    load.type = 'button';
+    load.className = 'ghost';
+    load.textContent = 'Load';
+    load.addEventListener('click', () => loadEntry(entry));
+
+    const rename = document.createElement('button');
+    rename.type = 'button';
+    rename.className = 'ghost';
+    rename.textContent = 'Rename';
+    rename.title = 'Edit the catalog name';
+    rename.addEventListener('click', () => {
+      name.focus();
+      name.select();
+    });
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'ghost';
+    del.textContent = 'Delete';
+    del.disabled = !!entry.builtin;
+    del.title = entry.builtin ? 'The built-in catalog cannot be deleted' : 'Remove from the history';
+    del.addEventListener('click', () => deleteEntry(entry));
+
+    actions.appendChild(load);
+    actions.appendChild(rename);
+    actions.appendChild(del);
+    row.appendChild(info);
+    row.appendChild(actions);
+    els.cfgSavedList.appendChild(row);
+  }
+}
+
+// Switch to a saved catalog and close the dialog.
+async function loadEntry(entry) {
+  setCfgStatus('Loading…');
+  try {
+    const ok = await switchToEntry(entry);
+    if (!ok) {
+      setCfgStatus('Another catalog is still loading — try again in a moment.', 'error');
+      return;
+    }
+    fillForm(entry);
+    renderSavedList();
+    closeSettings();
+  } catch (err) {
+    setCfgStatus('Failed to load: ' + err.message, 'error');
+  }
+}
+
+// Remove a catalog from the history (the built-in one stays).
+async function deleteEntry(entry) {
+  if (entry.builtin) return;
+  if (switching) {
+    setCfgStatus('Another catalog is still loading — try again in a moment.', 'error');
+    return;
+  }
+  savedConfigs = Catalog.removeSavedConfig(savedConfigs, entry.id);
+  saveSavedConfigs();
+  if (entry.id !== activeConfigId) {
+    renderSavedList();
+    return;
+  }
+  const next = savedConfigs[0];
+  if (!next) {
+    renderSavedList();
+    return;
+  }
+  try {
+    const ok = await switchToEntry(next);
+    if (!ok) {
+      setCfgStatus('Another catalog is still loading — try again in a moment.', 'error');
+      return;
+    }
+    fillForm(next);
+    setCfgStatus('Switched to ' + next.name + '.', 'ok');
+  } catch (err) {
+    setCfgStatus('Failed to load: ' + err.message, 'error');
+  }
+  renderSavedList();
+}
+
+function openSettings() {
+  const entry = activeEntry();
+  fillForm(entry);
+  renderSavedList();
+  setCfgStatus('');
+  if (els.settingsDialog.showModal) els.settingsDialog.showModal();
+  else els.settingsDialog.setAttribute('open', '');
+}
+
+function closeSettings() {
+  if (els.settingsDialog.close) els.settingsDialog.close();
+  else els.settingsDialog.removeAttribute('open');
+}
+
+els.btnSettings.addEventListener('click', openSettings);
+els.btnCancelSettings.addEventListener('click', closeSettings);
+els.btnAddAudioRow.addEventListener('click', () => addAudioRow({ label: '', pattern: '' }));
+
+els.btnTestSettings.addEventListener('click', async () => {
+  const cfg = readConfigFromForm();
+  els.btnTestSettings.disabled = true;
+  setCfgStatus('Fetching metadata…');
+  try {
+    validateConfig(cfg);
+    const parsed = Catalog.parseArchiveUrl(cfg.folderUrl);
+    const meta = await fetchMetadata(parsed.metadataUrl);
+    const built = Catalog.buildCatalog(meta, cfg);
+    const first = built.lessons[0];
+    setCfgStatus(
+      `OK — ${built.stats.lessons} lessons, ${built.stats.matchedFiles} audio files matched` +
+        (built.stats.duplicates ? `, ${built.stats.duplicates} duplicates ignored` : '') +
+        (first ? `. First: ${first.title}` : ''),
+      'ok'
+    );
+  } catch (err) {
+    setCfgStatus(err.message, 'error');
+  } finally {
+    els.btnTestSettings.disabled = false;
+  }
+});
+
+// Save the form into the history (updating the active catalog) and load it.
+async function saveForm({ forceNew }) {
+  if (switching) {
+    setCfgStatus('Another catalog is still loading — try again in a moment.', 'error');
+    return;
+  }
+  const cfg = readConfigFromForm();
+  const name = els.cfgName.value.trim() || Catalog.configLabel(cfg);
+  const button = forceNew ? els.btnSaveAsNew : els.btnSaveSettings;
+  button.disabled = true;
+  switching = true;
+  setCfgStatus('Loading…');
+  try {
+    validateConfig(cfg);
+    await applyConfig(cfg);
+    // The built-in catalog is permanent: editing it must not replace the
+    // built-in EnglishPod resource — a new entry is created instead.
+    const active = activeEntry();
+    const editingBuiltin = !!(active && active.builtin);
+    const isDefault =
+      Catalog.configSignature(cfg) === Catalog.configSignature(Catalog.DEFAULT_CONFIG);
+    const keepBuiltin = editingBuiltin && !isDefault;
+    const res = Catalog.upsertSavedConfig(savedConfigs, {
+      id: forceNew || keepBuiltin ? undefined : activeConfigId || undefined,
+      name,
+      config: cfg,
+      forceNew: !!forceNew,
+    });
+    savedConfigs = res.list;
+    activeConfigId = res.entry.id;
+    saveSavedConfigs();
+    applyCollectionTitle(); // the header shows the catalog name
+    renderLessonList('');
+    restoreLastLesson();
+    renderSavedList();
+    fillForm(res.entry);
+    closeSettings();
+  } catch (err) {
+    setCfgStatus('Failed to load: ' + err.message, 'error');
+  } finally {
+    switching = false;
+    button.disabled = false;
+  }
+}
+
+els.btnSaveSettings.addEventListener('click', () => saveForm({ forceNew: false }));
+els.btnSaveAsNew.addEventListener('click', () => saveForm({ forceNew: true }));
+
+els.btnResetSettings.addEventListener('click', async () => {
+  const cfg = cloneConfig(Catalog.DEFAULT_CONFIG);
+  const builtin = savedConfigs.find((e) => e.builtin);
+  els.btnResetSettings.disabled = true;
+  setCfgStatus('Loading…');
+  try {
+    const res = Catalog.upsertSavedConfig(savedConfigs, {
+      id: builtin ? builtin.id : DEFAULT_CONFIG_ID,
+      name: builtin ? builtin.name : 'EnglishPod',
+      config: cfg,
+      builtin: true,
+    });
+    savedConfigs = res.list;
+    saveSavedConfigs();
+    const ok = await switchToEntry(res.entry);
+    if (!ok) {
+      setCfgStatus('Another catalog is still loading — try again in a moment.', 'error');
+      return;
+    }
+    renderSavedList();
+    fillForm(res.entry);
+    setCfgStatus('Reset to the default resource.', 'ok');
+  } catch (err) {
+    setCfgStatus('Failed to load: ' + err.message, 'error');
+  } finally {
+    els.btnResetSettings.disabled = false;
+  }
+});
+
 async function init() {
   loadSettings();
+  loadSavedConfigs();
+  const entry = activeEntry();
+  resourceConfig = entry ? cloneConfig(entry.config) : cloneConfig(Catalog.DEFAULT_CONFIG);
+  if (entry) activeConfigId = entry.id;
   repeatTarget =
     els.repeatSelect.value === 'inf' ? Infinity : parseInt(els.repeatSelect.value, 10) || 1;
 
@@ -779,29 +1428,26 @@ async function init() {
 
   setupMediaSession();
   setupNativeBar();
-  await loadCatalog();
+
+  // Show the cached catalog of the active resource right away (offline-first).
+  showCachedCatalog(resourceConfig);
+
+  try {
+    await applyConfig(resourceConfig);
+  } catch (err) {
+    if (!catalog || !catalog.length) throw err;
+    console.warn('Catalog refresh failed, using the cached copy:', err);
+  }
   renderLessonList('');
   refreshStats();
 
-  // Restore last played lesson (and position) if present in the list.
-  let last = null;
-  try {
-    last = JSON.parse(localStorage.getItem('epod-last') || 'null');
-  } catch (err) {
-    /* ignore */
+  if (!catalog || !catalog.length) {
+    els.placeholder.querySelector('p').textContent =
+      'No lessons found. Open Settings to choose another Archive.org folder and file name patterns.';
+    return;
   }
-  const lesson = (last && catalog.find((l) => l.id === last.id)) || catalog[0];
 
-  let resume = 0;
-  try {
-    const pos = JSON.parse(localStorage.getItem('epod-position') || 'null');
-    if (pos && pos.id === lesson.id && (!last || !last.track || pos.track === last.track)) {
-      resume = pos.t || 0;
-    }
-  } catch (err) {
-    /* ignore */
-  }
-  selectLesson(lesson, last && last.track, resume > 5 ? { resumePosition: resume } : {});
+  restoreLastLesson();
 }
 
 init().catch((err) => {

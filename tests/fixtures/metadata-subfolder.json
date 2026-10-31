@@ -1,0 +1,46 @@
+{
+  "metadata": {
+    "identifier": "bjrmgbdt.zhangshuguangbo.2015",
+    "title": "北京长书广播 2015"
+  },
+  "files": [
+    { "name": "bjrmgbdt.zhangshuguangbo.2015_files.xml", "format": "Metadata" },
+    { "name": "bjrmgbdt.zhangshuguangbo.2015_meta.sqlite", "format": "Metadata" },
+    { "name": "bjrmgbdt.zhangshuguangbo.2015_archive.torrent", "format": "Archive BitTorrent" },
+    { "name": "__ia_thumb.jpg", "format": "Item Tile" },
+    {
+      "name": "北京人民广播电台/长书广播/广播剧/广播剧-20150624-000000.mp3",
+      "format": "VBR MP3",
+      "size": "14390973",
+      "length": "3600.61"
+    },
+    {
+      "name": "北京人民广播电台/长书广播/精品小说展播/精品小说展播-20150624-020000.mp3",
+      "format": "VBR MP3",
+      "size": "14402885",
+      "length": "3600.61"
+    },
+    {
+      "name": "北京人民广播电台/长书广播/精品小说展播/精品小说展播-20150624-100000.mp3",
+      "format": "VBR MP3",
+      "size": "14392958",
+      "length": "3598.13"
+    },
+    {
+      "name": "北京人民广播电台/长书广播/精品小说展播/精品小说展播-20150625-020000.mp3",
+      "format": "VBR MP3",
+      "size": "14388883",
+      "length": "3597.11"
+    },
+    {
+      "name": "englishpod_0001pb.mp3",
+      "format": "VBR MP3",
+      "size": "10489251",
+      "length": "647.29",
+      "title": "Elementary - Difficult Customer"
+    },
+    { "name": "englishpod_0001pb.ogg", "format": "Ogg Vorbis", "size": "5914845", "length": "647.24" },
+    { "name": "englishpod_0001dg.ogg", "format": "Ogg Vorbis", "size": "450063", "length": "50.29" },
+    { "name": "englishpod_0001dg.txt", "format": "Text", "size": "560" }
+  ]
+}

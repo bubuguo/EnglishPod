@@ -15,10 +15,11 @@
   <header class="topbar">
     <div class="brand">
       <img src="./icons/icon-192.png" alt="" width="32" height="32" />
-      <h1>EnglishPod Player</h1>
+      <h1 id="brandTitle">EnglishPod Player</h1>
     </div>
     <div class="cache-info">
       <span id="cacheUsage" title="Cached media size / quota">Cache: –</span>
+      <button id="btnSettings" class="ghost" type="button" title="Choose an Archive.org resource">Settings</button>
       <button id="btnClearCache" class="ghost" type="button">Clear cache</button>
     </div>
   </header>
@@ -100,6 +101,49 @@
     </main>
   </div>
 
+  <dialog id="settingsDialog" class="settings-dialog">
+    <div class="settings-body">
+      <h2>Resource settings</h2>
+
+      <h3 id="cfgSavedLabel">Saved catalogs</h3>
+      <div id="cfgSavedList" class="cfg-saved-list" role="list" aria-labelledby="cfgSavedLabel"></div>
+      <button id="btnSaveAsNew" class="ghost" type="button">+ Save current as new</button>
+
+      <label for="cfgName">Name</label>
+      <input id="cfgName" type="text" autocomplete="off" placeholder="My catalog" />
+
+      <label for="cfgFolderUrl">Archive.org folder URL</label>
+      <input id="cfgFolderUrl" type="text" autocomplete="off" spellcheck="false"
+        placeholder="https://archive.org/download/englishpod_all" />
+      <p class="muted small">
+        An item root or a subfolder inside the item. Percent-encoded paths are supported.
+      </p>
+
+      <label>Audio file name patterns</label>
+      <div id="cfgAudioRows" class="cfg-rows"></div>
+      <button id="btnAddAudioRow" class="ghost" type="button">+ Add track</button>
+
+      <label for="cfgTranscript">Transcript file name pattern (optional)</label>
+      <input id="cfgTranscript" type="text" autocomplete="off" spellcheck="false"
+        placeholder="englishpod_(.*)dg\.txt" />
+      <p class="muted small">
+        Regular expressions matched against the file name. Capture group 1 pairs audio with
+        transcripts (e.g. <code>(.*)</code>). Escape dots as <code>\.</code>.
+      </p>
+
+      <p id="cfgStatus" class="cfg-status"></p>
+
+      <div class="cfg-actions">
+        <button id="btnTestSettings" class="ghost" type="button">Test</button>
+        <button id="btnResetSettings" class="ghost" type="button">Reset to default</button>
+        <span class="cfg-spacer"></span>
+        <button id="btnCancelSettings" class="ghost" type="button">Cancel</button>
+        <button id="btnSaveSettings" type="button">Save & load</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="./catalog.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

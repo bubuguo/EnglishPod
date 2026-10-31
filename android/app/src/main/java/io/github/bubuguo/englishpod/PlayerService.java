@@ -85,7 +85,9 @@ public class PlayerService extends MediaSessionService {
     private final Runnable progressRunnable = new Runnable() {
         @Override
         public void run() {
-            if (player != null && events != null && player.isPlaying()) {
+            // Re-check the visibility on every tick: if the screen went off
+            // without the broadcast arriving, the chain stops by itself.
+            if (player != null && events != null && player.isPlaying() && uiVisible()) {
                 events.onProgress(player.getCurrentPosition(), player.getDuration());
                 handler.postDelayed(this, 1000);
             }
@@ -99,7 +101,12 @@ public class PlayerService extends MediaSessionService {
 
     private void startProgressTicks() {
         handler.removeCallbacks(progressRunnable); // de-dupe rapid pause->play
-        if (player != null && player.isPlaying()) {
+        // The ticks only exist while the UI can show them: the screen must be
+        // on AND the activity foregrounded. Without the uiVisible() check a
+        // SCREEN_ON broadcast (e.g. the user unlocks the phone while the app
+        // sits in the background) would restart the 1 Hz chain and keep the
+        // CPU — and the WebView — awake for nothing.
+        if (uiVisible() && player != null && player.isPlaying()) {
             handler.postDelayed(progressRunnable, 1000);
         }
     }

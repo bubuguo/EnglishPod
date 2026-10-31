@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 # 1. Copy web assets into www/ (Capacitor's webDir).
 mkdir -p www
-cp index.html styles.css app.js sw.js lessons.json manifest.webmanifest www/
+cp index.html styles.css app.js catalog.js sw.js manifest.webmanifest www/
 rm -rf www/icons
 cp -R icons www/
 

@@ -60,7 +60,7 @@ def make(size):
     return pixel
 
 
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", "icons")
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons")
 os.makedirs(out, exist_ok=True)
 for size in (192, 512):
     write_png(os.path.join(out, "icon-%d.png" % size), size, size, make(size))

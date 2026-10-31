@@ -41,6 +41,24 @@ public class AudioPlugin extends Plugin implements PlayerService.EventsListener 
         PlayerService.events = this;
     }
 
+    /* The WebView keeps running while the app is in the background, so the
+     * JS side has to know when the activity is paused: it then stops the
+     * display-only timers (the sleep-timer countdown) instead of waking the
+     * CPU every second in a background WebView. */
+    @Override
+    protected void handleOnPause() {
+        JSObject data = new JSObject();
+        data.put("state", "paused");
+        notifyListeners("appState", data);
+    }
+
+    @Override
+    protected void handleOnResume() {
+        JSObject data = new JSObject();
+        data.put("state", "active");
+        notifyListeners("appState", data);
+    }
+
     /** Ensure the service process is started (idempotent). */
     private void ensureServiceStarted() {
         try {
@@ -91,25 +109,36 @@ public class AudioPlugin extends Plugin implements PlayerService.EventsListener 
             call.reject("url is required");
             return;
         }
-        withService(call, (svc, c) -> svc.load(
+        // Resolve inside the action: withService() rejects the call when the
+        // service cannot be started (e.g. the app was launched in the
+        // background and Android refuses a background service start). If the
+        // call were resolved up front, that rejection would be swallowed and
+        // the JS side would never learn that the load failed.
+        withService(call, (svc, c) -> {
+            svc.load(
                 url,
                 c.getString("title", ""),
                 c.getString("artist", ""),
                 c.getInt("startPositionMs", 0),
-                c.getBoolean("autoplay", true)));
-        call.resolve();
+                c.getBoolean("autoplay", true));
+            c.resolve();
+        });
     }
 
     @PluginMethod
     public void play(final PluginCall call) {
-        withService(call, (svc, c) -> svc.play());
-        call.resolve();
+        withService(call, (svc, c) -> {
+            svc.play();
+            c.resolve();
+        });
     }
 
     @PluginMethod
     public void pause(final PluginCall call) {
-        withService(call, (svc, c) -> svc.player.pause());
-        call.resolve();
+        withService(call, (svc, c) -> {
+            svc.player.pause();
+            c.resolve();
+        });
     }
 
     @PluginMethod
@@ -119,8 +148,10 @@ public class AudioPlugin extends Plugin implements PlayerService.EventsListener 
             call.reject("ms is required");
             return;
         }
-        withService(call, (svc, c) -> svc.player.seekTo(ms));
-        call.resolve();
+        withService(call, (svc, c) -> {
+            svc.player.seekTo(ms);
+            c.resolve();
+        });
     }
 
     @PluginMethod
@@ -130,14 +161,18 @@ public class AudioPlugin extends Plugin implements PlayerService.EventsListener 
             call.reject("minutes must be positive");
             return;
         }
-        withService(call, (svc, c) -> svc.setSleepTimer(minutes));
-        call.resolve();
+        withService(call, (svc, c) -> {
+            svc.setSleepTimer(minutes);
+            c.resolve();
+        });
     }
 
     @PluginMethod
     public void clearSleepTimer(final PluginCall call) {
-        withService(call, (svc, c) -> svc.clearSleepTimer());
-        call.resolve();
+        withService(call, (svc, c) -> {
+            svc.clearSleepTimer();
+            c.resolve();
+        });
     }
 
     /** Native audio cache usage: bytes on disk, cached file count, quota.
